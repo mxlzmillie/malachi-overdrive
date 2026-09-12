@@ -197,14 +197,18 @@ describe('runCommand', () => {
     const result = await launchCommand(shell!, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], cwd);
     expect(result.pid).toBeGreaterThan(0);
 
-    const deadline = Date.now() + 3000;
+    // GitHub's native Windows ARM64 runners can spend several seconds cold-starting
+    // PowerShell even after CreateProcess has reported a successful spawn. The contract
+    // under test is execution, not sub-three-second startup latency, so keep polling long
+    // enough to cover a cold hosted runner while still failing a child that never executes.
+    const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
       const text = await fs.readFile(marker, 'utf8').catch(() => '');
       if (text === 'launched') return;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     throw new Error('launchCommand reported spawn but the PowerShell payload never executed');
-  });
+  }, 20_000);
 
   it('rejects an empty command', async () => {
     await expect(runCommand('   ', [], cwd, 5000)).rejects.toBeInstanceOf(ExecError);

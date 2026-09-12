@@ -11,6 +11,13 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.10] — 2026-09-12
+
+- Hardened the Windows ARM64 release verification for slow PowerShell cold starts. The test still requires the launched payload to execute; it now allows up to 15 seconds on a cold hosted runner instead of treating startup latency above three seconds as a product failure.
+- Carries forward the MALACHI OVERDRIVE trusted release channel and safe automatic Windows/Linux AppImage update flow introduced in 2.0.9.
+
+See [the full release notes](docs/release-notes/v2.0.10.md).
+
 ## [2.0.9] — 2026-09-11
 
 - Rebranded every current user-facing app, connector, installer and companion surface as **MALACHI OVERDRIVE** while retaining load-bearing compatibility identifiers where changing them would strand existing settings or permissions.

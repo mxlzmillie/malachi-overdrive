@@ -1,5 +1,5 @@
 > [!IMPORTANT]
-> **2.0.9 — MALACHI OVERDRIVE bootstrap release.** Windows and Linux AppImage installs now download verified updates in the background and restart automatically only when the laptop and app work are idle. The packaged companion folder is refreshed on startup as part of the same app update.
+> **2.0.10 — MALACHI OVERDRIVE auto-update release.** Windows and Linux AppImage installs download verified updates in the background and restart automatically only when the laptop and app work are idle. This patch also hardens the Windows ARM64 release verification against slow hosted-runner PowerShell cold starts.
 > Model discovery now reads your account's native picker state across languages and nested version menus.
 > See [Browser behavior](#browser-behavior-in-the-current-source) for tab reuse, Browser only and native file attachments.
 
@@ -29,7 +29,7 @@ Screenshots of the app with private conversation and folder details redacted. Ch
 
 ## Why this exists
 
-### Malachi Overdrive — custom v2.0.9 workspace
+### Malachi Overdrive — custom v2.0.10 workspace
 
 This working tree includes Malachi's custom interface and local workflow changes; do not
 replace it with an upstream checkout. **Commands** in the title bar, or **Cmd+K / Ctrl+K**,

@@ -1,0 +1,21 @@
+name: Bootstrap publish v2.0.10
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch verified v2.0.10 release
+    if: github.repository == 'mxlzmillie/malachi-overdrive'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start Publish release at v2.0.10
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref v2.0.10

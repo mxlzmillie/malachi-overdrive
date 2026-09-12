@@ -70,6 +70,8 @@ const {
   REVIVAL_ACTIVITY_MS,
   REVIVAL_DEADLINE_MS,
   WORKER_BOOTSTRAP_LIMIT_MS,
+  PRO_WORKER_BOOTSTRAP_LIMIT_MS,
+  PRO_WORKER_COMMAND_DEADLINE_MS,
   WORKER_REDEEM_MS,
   BROWSER_RECOVERY_COOLDOWN_MS,
   DEFAULT_PORTS,
@@ -4562,6 +4564,25 @@ describe('a worker chat that never opens', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('keeps a redeemed Pro worker alive through the temporary provider-access window without reopening it', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      spawn({ workers: [{ task: 'overnight Pro audit', model: 'gpt-6-pro', reasoning_effort: 'pro' }], caller: { conversationId: PRIME_CHAT } });
+      await vi.waitFor(() => expect(opened).toHaveLength(1));
+      const command = await redeem();
+      expect(command).toMatchObject({ agent: 'worker-1', model: 'gpt-6-pro', reasoningEffort: 'pro' });
+      await vi.advanceTimersByTimeAsync(COMMAND_DEADLINE_MS + 1_000);
+      expect(pendingCommands().some(entry => entry.id === command.id)).toBe(true);
+      expect(swarmState().agents.find(agent => agent.id === 'worker-1')?.state).toBe('invited');
+      expect(opened).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(PRO_WORKER_COMMAND_DEADLINE_MS - COMMAND_DEADLINE_MS + 1_000);
+      expect(pendingCommands().some(entry => entry.id === command.id)).toBe(false);
+      expect(swarmStateForCaller({ conversationId: PRIME_CHAT }).agents.find(agent => agent.id === 'worker-1')?.state).toBe('failed');
+      expect(PRO_WORKER_BOOTSTRAP_LIMIT_MS).toBeGreaterThan(PRO_WORKER_COMMAND_DEADLINE_MS);
+    } finally { vi.useRealTimers(); }
   });
 
   it('fails an unredeemed opening without duplicating it or holding its sibling', async () => {

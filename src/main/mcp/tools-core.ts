@@ -1,6 +1,8 @@
 import { goalWorkerChat } from '../bridge.js';
 import { announceSessionFinish } from '../session/finish.js';
 import { getConfig } from '../config.js';
+import { getChatModels, refreshChatModelsAndWait } from '../chat-models.js';
+import { observedChatModelSelection } from '../../shared/chat-models.js';
 /**
  * The Core connector: reading, changing and running code on this PC.
  *
@@ -1296,6 +1298,37 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
           });
           let accepted = false;
           try {
+            // Exact worker model requests are part of the spawn contract, not best-effort UI
+            // decoration. Validate every newly invited explicit selection against ChatGPT's own
+            // account picker before the swarm crosses its durable acceptance boundary or opens a
+            // single worker tab. If the restored catalog does not prove the selection, refresh it
+            // once through the existing browser discovery owner and re-check atomically.
+            const selectedWorkers = staged.created.filter(
+              (worker) => worker.state === 'invited' && (worker.model !== null || worker.reasoningEffort !== null)
+            );
+            if (selectedWorkers.length > 0) {
+              let catalog = getChatModels();
+              let unavailable = selectedWorkers.filter(
+                (worker) => !observedChatModelSelection(catalog.models, worker.model, worker.reasoningEffort)
+              );
+              if (catalog.state !== 'ready' || unavailable.length > 0) {
+                catalog = await refreshChatModelsAndWait();
+                unavailable = selectedWorkers.filter(
+                  (worker) => !observedChatModelSelection(catalog.models, worker.model, worker.reasoningEffort)
+                );
+              }
+              if (catalog.state !== 'ready' || unavailable.length > 0) {
+                const wanted = unavailable.length > 0 ? unavailable : selectedWorkers;
+                const names = wanted.map((worker) =>
+                  `${worker.id} (${worker.model ?? 'current model'}${worker.reasoningEffort ? `, ${worker.reasoningEffort}` : ''})`
+                ).join(', ');
+                throw new Error(
+                  `MODEL_UNAVAILABLE: ChatGPT's current account model picker did not confirm ${names}. ` +
+                  'No workers were created. MALACHI OVERDRIVE refreshed the account catalog rather than silently falling back; ' +
+                  'retry this same spawn only after the requested model is available in ChatGPT.'
+                );
+              }
+            }
             let durable = false;
             try {
               durable = await persistCriticalSwarmNow();

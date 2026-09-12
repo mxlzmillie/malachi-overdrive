@@ -21,7 +21,7 @@ describe('portable browser-backed feature parity', () => {
       expect(config.goal.enabled).toBe(false);
       expect(config.multiAgent).toEqual({
         enabled: true,
-        maxWorkers: 2,
+        maxWorkers: 3,
         allowUnattributedCalls: true,
         recoverAgentTabs: false
       });

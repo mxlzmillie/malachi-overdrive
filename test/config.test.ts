@@ -366,7 +366,7 @@ describe('shipped defaults', () => {
         expect(enabled, `${platform}:${capability}`).toBe(expectedFreshCapability(capability, platform));
       }
       expect(config.multiAgent.enabled).toBe(true);
-      expect(config.multiAgent.maxWorkers).toBe(2);
+      expect(config.multiAgent.maxWorkers).toBe(3);
       expect(config.multiAgent.allowUnattributedCalls).toBe(true);
       expect(config.multiAgent.recoverAgentTabs).toBe(false);
     }

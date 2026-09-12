@@ -9514,8 +9514,35 @@
     if (!readyComposer) return void (await fail('ChatGPT never exposed a usable composer for bootstrap'));
     if (await failIfRetargeted()) return;
 
-    if ((boot.model || boot.reasoningEffort) && !(await CLF_DOM.selectModelSettings(boot.model, boot.reasoningEffort, stillOnTarget))) {
-      return void (await fail('The requested model or reasoning is unavailable or could not be confirmed in ChatGPT'));
+    if (boot.model || boot.reasoningEffort) {
+      const normalizedBootModel = String(boot.model || '').trim().toLowerCase().replace(/\s+/g, '-');
+      const proBootstrap = boot.reasoningEffort === 'pro' ||
+        /^(?:astra|gpt-?6-astra|gpt-?\d+(?:[.-]\d+)?-pro)$/.test(normalizedBootModel);
+      const blockingProviderNotice = () => CLF_DOM.errors().find(error => error.blocking === true) || null;
+      const proAccessDeadline = Date.now() + 8 * 60_000;
+      const waitForProAccess = async (notice) => {
+        if (!proBootstrap || !notice || Date.now() >= proAccessDeadline) return false;
+        // Stay in this exact leased document. A temporary access throttle is neither model
+        // unavailability nor permission to open/redeem another worker tab. The DOM error reader
+        // acknowledges the provider dialog once; MutationObserver-backed waitPageView wakes as
+        // soon as ChatGPT removes it, without foreground timers or polling.
+        return Boolean(await waitPageView(
+          () => (!notice.node?.isConnected || !notice.node.getClientRects?.().length) ? true : null,
+          stillOnTarget,
+          Math.max(1, proAccessDeadline - Date.now())
+        ));
+      };
+      for (;;) {
+        const before = blockingProviderNotice();
+        if (before) {
+          if (await waitForProAccess(before)) continue;
+          return void (await fail(before.text));
+        }
+        if (await CLF_DOM.selectModelSettings(boot.model, boot.reasoningEffort, stillOnTarget)) break;
+        const after = blockingProviderNotice();
+        if (after && await waitForProAccess(after)) continue;
+        return void (await fail(after?.text || 'The requested model or reasoning is unavailable or could not be confirmed in ChatGPT'));
+      }
     }
     const selectionConfirmedAt = Date.now();
     const publishBootstrapSelection = (id) => {

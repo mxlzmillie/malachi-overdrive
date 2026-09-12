@@ -205,7 +205,7 @@ terminal dependency. Desktop automation is available through native Windows and 
 
 Fresh-install defaults from `config.ts` — **Core tool permissions on except opt-in ChatGPT file saving**, **read-only off**,
 **recording on**, session advisory/limit **400k/533k** estimated tokens, **auto-compaction on
-at 400k and level-based with live-work gating**, **multi-agent on** with `maxWorkers` 2 (hard max 8).
+at 400k and level-based with live-work gating**, **multi-agent on** with `maxWorkers` 3 (hard max 8).
 Fresh multi-agent also starts with `allowUnattributedCalls=true`; `recoverAgentTabs` starts **off**
 everywhere, because Goal/Loop chats are recovered regardless of it (see §11).
 That `true` is `FIRST_LAUNCH_MULTI_AGENT` only; `DEFAULT_MULTI_AGENT` — the schema/migration

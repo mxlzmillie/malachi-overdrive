@@ -10874,6 +10874,45 @@ describe('the fresh chat the app opened', () => {
     ]);
   });
 
+  it('waits out a temporary Pro access limit in the same worker tab, then sends once', async () => {
+    let release!: (value: unknown) => void;
+    const redeemed = new Promise(resolve => { release = resolve; });
+    const workerChat = '32323232-3333-4444-8555-666666666666';
+    live = await harness('https://chatgpt.com/?clf=cmd-pro-throttle', {
+      redeem: () => redeemed,
+      ack: () => ({ ok: true })
+    }, (document, dom) => {
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+        dom.reconfigure({ url: `https://chatgpt.com/c/${workerChat}` });
+        userTurn(document, 'pro-worker-user', 'Worker task', { sent: false });
+      });
+    });
+    const notice = live.document.createElement('div');
+    notice.setAttribute('role', 'dialog');
+    Object.defineProperty(notice, 'getClientRects', { value: () => [{ width: 400, height: 200 }] });
+    notice.innerHTML = '<h2>Too many requests</h2><p>We have temporarily limited access to conversations to protect your data. Please wait a few minutes.</p>';
+    live.document.body.append(notice);
+    const select = vi.fn(async () => true);
+    (live.window as any).CLF_DOM.selectModelSettings = select;
+    // The shared content-script harness intentionally makes ordinary waits instant and advances
+    // its fake clock by the requested duration. Hold only this long Pro access deadline instead:
+    // the production path is MutationObserver-driven, and removing the exact dialog below is the
+    // event that should resume the same leased worker page.
+    const harnessTimeout = live.window.setTimeout;
+    live.window.setTimeout = ((fn: () => void, ms?: number) =>
+      (ms ?? 0) >= 8 * 60_000 ? 991 : harnessTimeout(fn, ms)) as typeof live.window.setTimeout;
+    release({ ok: true, command: { id: 'cmd-pro-throttle', type: 'worker', text: 'Worker task', agent: 'worker-1', model: 'gpt-6-pro', reasoningEffort: 'pro' } });
+    await settle(150);
+    expect(select).not.toHaveBeenCalled();
+    expect(live.sent.some(message => message.type === 'ack' && message.id === 'cmd-pro-throttle')).toBe(false);
+    notice.remove();
+    await settle(500);
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(live.sent.filter(message => message.type === 'ack')).toEqual([
+      expect.objectContaining({ id: 'cmd-pro-throttle', status: 'sent', conversationId: workerChat })
+    ]);
+  });
+
   it.each([true, false])('journals the verified worker model only after successful bootstrap (%s)', async confirmed => {
     let release!: (value: unknown) => void;
     const redeemed = new Promise(resolve => { release = resolve; });

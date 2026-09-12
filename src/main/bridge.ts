@@ -231,6 +231,10 @@ export const COMMAND_DEADLINE_MS = 90_000;
  * The absolute invitation lifetime also bounds commands waiting behind another bootstrap. */
 export const WORKER_REDEEM_MS = 20_000;
 export const WORKER_BOOTSTRAP_LIMIT_MS = 120_000;
+/** A redeemed Pro/Astra worker may sit through ChatGPT's temporary-access throttle in-place. */
+export const PRO_WORKER_BOOTSTRAP_LIMIT_MS = 10 * 60_000;
+/** Keep the page-owned Pro attempt inside that absolute invitation lifetime. */
+export const PRO_WORKER_COMMAND_DEADLINE_MS = 9 * 60_000;
 /** A worker may occupy the broker's `waking` state for one short, absolute attempt. */
 /**
  * How long the browser has to prove it typed a wake into a sleeping worker's chat.
@@ -6862,18 +6866,19 @@ function commandDeadlineDelay(command: Command, now = Date.now()): number {
     if (continuation?.state === 'claimed') return continuation.touchedAt + CONTINUATION_TTL_MS - now;
   }
   if (command.spec.type === 'worker') {
-    // Absolute, from the invitation. Whatever else this command is waiting for, the slot it
-    // holds stops being `invited` by this instant. A command still in line has no clock of its
-    // own: every ending of the command ahead of it calls deliver(), and this limit is the fence.
-    const limit = command.createdAt + WORKER_BOOTSTRAP_LIMIT_MS;
+    const pro = isProModel(command.spec.model, command.spec.reasoningEffort ?? undefined);
+    // Absolute, from the invitation. Ordinary workers keep the short fence. An explicitly
+    // requested Pro worker gets a longer *page-owned* lifetime because ChatGPT's access throttle
+    // explicitly asks for a few minutes; opening another tab or failing the worker cannot fix it.
+    const limit = command.createdAt + (pro ? PRO_WORKER_BOOTSTRAP_LIMIT_MS : WORKER_BOOTSTRAP_LIMIT_MS);
     if (command.claimedAt === null) return limit - now;
-    // Opened but not yet redeemed: the page's round trip, not its typing budget. A browser this
-    // app had to start is given its launch window on top, since nothing can redeem before it is up.
+    // Opened but not yet redeemed remains short even for Pro: no page owns the command yet, so a
+    // longer timeout would only hide a browser-opening failure and hold the worker slot hostage.
     if (command.owner === null) {
       const redeemBy = Math.max(command.claimedAt + WORKER_REDEEM_MS, lastBrowserLaunchAt + BROWSER_LAUNCH_GRACE_MS);
       return Math.min(redeemBy, limit) - now;
     }
-    return Math.min(command.claimedAt + COMMAND_DEADLINE_MS, limit) - now;
+    return Math.min(command.claimedAt + (pro ? PRO_WORKER_COMMAND_DEADLINE_MS : COMMAND_DEADLINE_MS), limit) - now;
   }
   const claimedAt = command.claimedAt ?? now;
   return claimedAt + COMMAND_DEADLINE_MS - now;

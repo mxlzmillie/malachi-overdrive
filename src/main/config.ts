@@ -163,8 +163,10 @@ const DEFAULT_GOAL: GoalSettings = {
   objectivePrompt: DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT,
   loopPrompt: DEFAULT_GOAL_LOOP_SYSTEM_PROMPT
 };
-// Two workers, not three: three concurrent workers reproducibly trips ChatGPT's rate limit
-// ("too many requests"), which strands the run rather than making it faster.
+// Existing/migration baseline stays conservative at two so an upgrade never widens a saved
+// policy merely because an older config omitted the field. Fresh stability installs opt into
+// three below; Pro worker admission now verifies the live account catalog and rides out the
+// provider's temporary-access dialog in its already-owned tab instead of stranding the run.
 const DEFAULT_MULTI_AGENT: MultiAgentSettings = {
   enabled: false,
   maxWorkers: 2,
@@ -188,6 +190,7 @@ const ALL_FIRST_LAUNCH_CAPABILITIES: Capabilities = Object.fromEntries(
 const FIRST_LAUNCH_MULTI_AGENT: MultiAgentSettings = {
   ...DEFAULT_MULTI_AGENT,
   enabled: true,
+  maxWorkers: 3,
   allowUnattributedCalls: true
 };
 

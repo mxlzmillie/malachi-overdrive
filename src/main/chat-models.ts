@@ -22,6 +22,11 @@ let deadline: ReturnType<typeof setTimeout> | null = null;
 let launch: { nonce: string; allowOpen: boolean; work: Promise<void> } | null = null;
 let changed = (): void => {};
 let wake: ((nonce: string, allowOpen: boolean) => Promise<void>) | null = null;
+const waiters = new Set<() => void>();
+function publishChanged(): void {
+  changed();
+  for (const waiter of [...waiters]) waiter();
+}
 export async function restoreChatModels(): Promise<void> {
   const saved = z.object({ observedAt: z.number().finite().positive(), models: observation.shape.models.unwrap() }).strict().safeParse(await readDurable('chat-models'));
   if (!saved.success || request || catalog.state !== 'unknown') return;
@@ -35,7 +40,7 @@ function failed(error: string): void {
 export function configureChatModelDiscovery(options: { changed: () => void; wake: (nonce: string, allowOpen: boolean) => Promise<void> }): void { changed = options.changed; wake = options.wake; }
 function scheduleDeadline(at: number): void {
   if (deadline) clearTimeout(deadline);
-  deadline = setTimeout(() => { deadline = null; expire(); changed(); wakeBrowserWork(); }, Math.max(0, at - Date.now()));
+  deadline = setTimeout(() => { deadline = null; expire(); publishChanged(); wakeBrowserWork(); }, Math.max(0, at - Date.now()));
   deadline.unref?.();
 }
 function expire(): void {
@@ -81,7 +86,7 @@ export async function startChatModelDiscovery(allowOpen = true): Promise<ChatMod
         request = null;
         if (deadline) clearTimeout(deadline); deadline = null;
         failed(`${(error as Error).message}. Retry model discovery.`.slice(0, 240));
-        changed(); wakeBrowserWork();
+        publishChanged(); wakeBrowserWork();
       }
     })();
     attempt.work = work;
@@ -94,6 +99,34 @@ export async function startChatModelDiscovery(allowOpen = true): Promise<ChatMod
   if (launch === attempt) launch = null;
   return getChatModels();
 }
+/**
+ * Explicit worker/model admission may need a fresh account observation before it is safe to open
+ * any worker tabs. Reuse the one existing discovery request and wait on its publication boundary;
+ * do not poll or invent provider choices.
+ */
+export async function refreshChatModelsAndWait(): Promise<ChatModelCatalog> {
+  await startChatModelDiscovery(true);
+  const pending = request;
+  if (!pending) return getChatModels();
+  const nonce = pending.nonce;
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (request?.nonce === nonce && catalog.state === 'pending' && Date.now() < pending.expiresAt) return;
+      waiters.delete(finish);
+      if (timer) clearTimeout(timer);
+      resolve(getChatModels());
+    };
+    waiters.add(finish);
+    timer = setTimeout(() => {
+      waiters.delete(finish);
+      resolve(getChatModels());
+    }, Math.max(1, pending.expiresAt - Date.now() + 50));
+    timer.unref?.();
+    finish();
+  });
+}
+
 export function pendingChatModelRequest(): { nonce: string; expiresAt: number; allowOpen: boolean } | null {
   expire(); return request ? { ...request } : null;
 }
@@ -113,9 +146,11 @@ export function observeChatModels(raw: unknown): boolean {
   } else failed(error);
   request = null;
   if (deadline) clearTimeout(deadline); deadline = null;
-  changed(); wakeBrowserWork(); return true;
+  publishChanged(); wakeBrowserWork(); return true;
 }
 export function resetChatModelsForTests(): void {
   if (deadline) clearTimeout(deadline); deadline = null; launch = null;
   request = null; catalog = { state: 'unknown', requestedAt: null, observedAt: null, models: [] };
+  for (const waiter of [...waiters]) waiter();
+  waiters.clear();
 }

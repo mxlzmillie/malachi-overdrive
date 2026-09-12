@@ -11,6 +11,15 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.11] — 2026-09-12
+
+- Added account-proven GPT-6 Pro/Astra worker admission: explicit Pro workers are validated against ChatGPT's observed model catalog before any worker is published or opened, with no silent fallback.
+- Fresh installs now allow three workers, while existing/migrated configs preserve their saved limit. A three-worker spawn is atomic: if either requested Pro lane is unavailable after a fresh catalog refresh, zero workers start.
+- Hardened long Pro worker bootstraps against ChatGPT's temporary access-limit dialog by waiting in the same redeemed tab and retrying exact model confirmation, with Pro-specific bounded deadlines and no duplicate opener.
+- Canonicalized legacy `6` + Pro worker requests to `gpt-6-pro` while preserving opaque future/provider model identities.
+
+See [the full release notes](docs/release-notes/v2.0.11.md).
+
 ## [2.0.10] — 2026-09-12
 
 - Hardened the Windows ARM64 release verification for slow PowerShell cold starts. The test still requires the launched payload to execute; it now allows up to 15 seconds on a cold hosted runner instead of treating startup latency above three seconds as a product failure.

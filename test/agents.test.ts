@@ -90,6 +90,7 @@ const {
   workerRevivalClaimed
 } = await import('../src/main/agents.js');
 const { startMcpServer } = await import('../src/main/mcp/server.js');
+const { configureChatModelDiscovery, observeChatModels, pendingChatModelRequest, requestChatModels, resetChatModelsForTests } = await import('../src/main/chat-models.js');
 const { runningToolCalls } = await import('../src/main/mcp/call-context.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
 const { findSessionByConversation, initSessionStore, readRecentEvents, resetSessionStoreForTests } = await import(
@@ -128,6 +129,8 @@ beforeEach(() => {
   resetAgentsForTests();
   resetRecorderForTests();
   resetWorkspaces();
+  resetChatModelsForTests();
+  configureChatModelDiscovery({ changed: () => {}, wake: async () => {} });
   // The real app wires the broker's immediate persistence sink during startup. MCP endpoint
   // tests exercise that production contract rather than an intentionally half-wired broker;
   // durability-specific cases below replace this no-op sink with controlled writers.
@@ -373,6 +376,12 @@ describe('worker models', () => {
     resetAgentsForTests();
     restoreSwarm(tampered);
     expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.model).toBeNull();
+  });
+
+  it('canonicalizes the legacy GPT-6 family id when Pro is requested', () => {
+    const result = spawn({ workers: [{ label: 'Pro', task: 'deep work', model: '6', reasoning_effort: 'pro' }], caller: prime });
+    expect(result.created[0]).toMatchObject({ model: 'gpt-6-pro', reasoningEffort: 'pro' });
+    expect(pendingWorkerSpawns()[0]).toMatchObject({ model: 'gpt-6-pro', reasoningEffort: 'pro' });
   });
 
   it('stores reasoning_effort without touching the model', () => {
@@ -2288,6 +2297,62 @@ describe('through the MCP endpoint', () => {
     expect(schema.properties.action.enum.slice().sort()).toEqual(['finish', 'message', 'spawn', 'status']);
     // Revive is gone from the wire as well as from the broker: no field survives for it.
     expect(Object.keys(schema.properties)).not.toContain('agent');
+  });
+
+  it('atomically admits three workers only after both requested GPT-6 Pro lanes are account-proven', async () => {
+    await setEnabled(true, 3);
+    requestChatModels();
+    expect(observeChatModels({
+      nonce: pendingChatModelRequest()!.nonce,
+      models: [
+        { id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] },
+        { id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high'], aliases: ['gpt-5-6-thinking'] }
+      ]
+    })).toBe(true);
+
+    const text = await asChat(PRIME_CHAT, 'spawn', {
+      workers: [
+        { label: 'Pro A', task: 'overnight stability pass A', model: '6', reasoning_effort: 'pro' },
+        { label: 'Pro B', task: 'overnight stability pass B', model: 'gpt-6-pro', reasoning_effort: 'pro' },
+        { label: 'Verifier', task: 'independent verification pass' }
+      ]
+    });
+
+    expect(text).toContain('3 worker(s) matched');
+    expect(pendingWorkerSpawns()).toEqual([
+      expect.objectContaining({ id: 'worker-1', model: 'gpt-6-pro', reasoningEffort: 'pro' }),
+      expect.objectContaining({ id: 'worker-2', model: 'gpt-6-pro', reasoningEffort: 'pro' }),
+      expect.objectContaining({ id: 'worker-3', model: null, reasoningEffort: null })
+    ]);
+  });
+
+  it('opens zero workers when a fresh account refresh still cannot prove GPT-6 Pro', async () => {
+    await setEnabled(true, 3);
+    const solOnly = [{ id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high'], aliases: ['gpt-5-6-thinking'] }];
+    requestChatModels();
+    expect(observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models: solOnly })).toBe(true);
+    configureChatModelDiscovery({
+      changed: () => {},
+      wake: async (nonce) => {
+        expect(observeChatModels({ nonce, models: solOnly })).toBe(true);
+      }
+    });
+    const published: unknown[] = [];
+    onSpawnRequest((workers) => published.push(...workers));
+
+    const text = await asChat(PRIME_CHAT, 'spawn', {
+      workers: [
+        { label: 'Pro A', task: 'overnight stability pass A', model: '6', reasoning_effort: 'pro' },
+        { label: 'Pro B', task: 'overnight stability pass B', model: 'gpt-6-pro', reasoning_effort: 'pro' },
+        { label: 'Verifier', task: 'must not start alone' }
+      ]
+    });
+
+    expect(text).toContain('MODEL_UNAVAILABLE');
+    expect(text).toContain('No workers were created');
+    expect(swarmRunning()).toBe(false);
+    expect(pendingWorkerSpawns()).toEqual([]);
+    expect(published).toEqual([]);
   });
 
   it('is identified by exact request-id evidence that arrived before the call it names', async () => {

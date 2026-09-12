@@ -1,6 +1,7 @@
 import { REASONING_EFFORTS } from '../src/shared/session.js';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { getChatModels, requestChatModels, pendingChatModelRequest, observeChatModels, resetChatModelsForTests, configureChatModelDiscovery, startChatModelDiscovery, restoreChatModels } from '../src/main/chat-models.js';
+import { getChatModels, requestChatModels, pendingChatModelRequest, observeChatModels, resetChatModelsForTests, configureChatModelDiscovery, startChatModelDiscovery, restoreChatModels, refreshChatModelsAndWait } from '../src/main/chat-models.js';
+import { canonicalRequestedChatModel, observedChatModelSelection } from '../src/shared/chat-models.js';
 const saved = vi.hoisted(() => ({ value: null as unknown }));
 vi.mock('../src/main/durable.js', () => ({ readDurable: async () => saved.value, writeDurableSoon: (_name: string, value: unknown) => { saved.value = structuredClone(value); } }));
 const models = [{ id: 'gpt-example', label: 'GPT Example', efforts: ['none', 'medium', 'high', 'xhigh'] }];
@@ -130,4 +131,27 @@ it('publishes exactly all canonical observed efforts without dropping Low or imp
   const observed = [{ id: 'actual-sol', label: 'GPT-5.6 Sol', efforts: [...REASONING_EFFORTS] }];
   expect(observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models: observed })).toBe(true);
   expect(getChatModels()).toMatchObject({ state: 'ready', models: observed });
+});
+
+it('canonicalizes the legacy GPT-6 Pro family id and resolves only observed Pro authority', () => {
+  const pro = [{ id: '6', label: 'GPT-6 Pro', efforts: ['pro' as const], aliases: ['gpt-6-pro'] }];
+  expect(canonicalRequestedChatModel('6', 'pro')).toBe('gpt-6-pro');
+  expect(canonicalRequestedChatModel('gpt-6-astra', 'pro')).toBe('gpt-6-pro');
+  expect(canonicalRequestedChatModel('gpt-6-astra-wm', 'medium')).toBe('gpt-6-astra-wm');
+  expect(observedChatModelSelection(pro, 'gpt-6-pro', 'pro')).toEqual(pro[0]);
+  expect(observedChatModelSelection(pro, '6', 'pro')).toEqual(pro[0]);
+  expect(observedChatModelSelection(pro, 'gpt-6-pro', 'high')).toBeNull();
+});
+
+it('waits on one explicit account refresh and returns its observed model catalog', async () => {
+  const wake = vi.fn(async () => {});
+  configureChatModelDiscovery({ wake, changed: () => {} });
+  const waiting = refreshChatModelsAndWait();
+  await Promise.resolve();
+  const pending = pendingChatModelRequest();
+  expect(pending).not.toBeNull();
+  const pro = [{ id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] }];
+  expect(observeChatModels({ nonce: pending!.nonce, models: pro })).toBe(true);
+  await expect(waiting).resolves.toMatchObject({ state: 'ready', models: pro });
+  expect(wake).toHaveBeenCalledTimes(1);
 });

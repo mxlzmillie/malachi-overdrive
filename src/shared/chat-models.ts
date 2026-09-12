@@ -6,6 +6,45 @@ export function isAstraModel(model: string | null | undefined, effort?: Reasonin
     (/^(?:gpt-?)?6(?:\.0)?$/.test(normalized) && effort === 'pro');
 }
 export type ChatModelOption = { id: string; label: string; efforts: ReasoningEffort[]; aliases?: string[] };
+
+const normalizedModelName = (value: string): string => value.trim().toLowerCase().replace(/[^a-z0-9.]/g, '');
+
+/**
+ * Converts only the legacy GPT-6 family spellings that unambiguously mean the Pro lane into
+ * ChatGPT's exact execution alias. Other provider ids remain opaque: Work/future model ids are
+ * not ours to reinterpret.
+ */
+export function canonicalRequestedChatModel(
+  model: string | null | undefined,
+  effort?: ReasoningEffort | '' | null
+): string | null {
+  const value = model?.trim() ?? '';
+  if (!value) return null;
+  const normalized = value.toLowerCase().replace(/\s+/g, '-');
+  if (effort === 'pro' && /^(?:6|gpt-?6(?:\.0)?|gpt-?6-astra)$/.test(normalized)) return 'gpt-6-pro';
+  return value;
+}
+
+/**
+ * Resolves one requested model/effort only against choices ChatGPT actually exposed for this
+ * account. Exact family/alias ids win; normalized labels are compatibility for persisted display
+ * values. No match means unavailable — never permission to fall back to the account default.
+ */
+export function observedChatModelSelection(
+  models: readonly ChatModelOption[],
+  model: string | null | undefined,
+  effort?: ReasoningEffort | '' | null
+): ChatModelOption | null {
+  const requested = canonicalRequestedChatModel(model, effort);
+  const requestedName = requested ? normalizedModelName(requested) : '';
+  for (const choice of models) {
+    if (effort && !choice.efforts.includes(effort as ReasoningEffort)) continue;
+    if (!requested) return choice;
+    if (choice.id === requested || choice.aliases?.includes(requested)) return choice;
+    if (normalizedModelName(choice.label) === requestedName) return choice;
+  }
+  return null;
+}
 /** Pro silence policy follows the selected provider identity, including the older generation. */
 export function isProModel(model: string | null | undefined, effort?: ReasoningEffort): boolean {
   const normalized = (model ?? '').trim().toLowerCase().replace(/\s+/g, '-');

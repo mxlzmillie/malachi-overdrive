@@ -1,5 +1,5 @@
 > [!IMPORTANT]
-> **2.0.10 — MALACHI OVERDRIVE auto-update release.** Windows and Linux AppImage installs download verified updates in the background and restart automatically only when the laptop and app work are idle. This patch also hardens the Windows ARM64 release verification against slow hosted-runner PowerShell cold starts.
+> **2.0.11 — MALACHI OVERDRIVE overnight stability release.** Multi-agent runs now admit three workers atomically, verify requested GPT-6 Pro/Astra lanes against ChatGPT's live account model catalog before opening any worker, and keep an already-owned Pro worker alive through temporary provider access throttles instead of silently falling back or duplicating tabs.
 > Model discovery now reads your account's native picker state across languages and nested version menus.
 > See [Browser behavior](#browser-behavior-in-the-current-source) for tab reuse, Browser only and native file attachments.
 
@@ -29,7 +29,7 @@ Screenshots of the app with private conversation and folder details redacted. Ch
 
 ## Why this exists
 
-### Malachi Overdrive — custom v2.0.10 workspace
+### Malachi Overdrive — custom v2.0.11 workspace
 
 This working tree includes Malachi's custom interface and local workflow changes; do not
 replace it with an upstream checkout. **Commands** in the title bar, or **Cmd+K / Ctrl+K**,

@@ -19,7 +19,7 @@ Upstream build/source projects:
 
 For the sharp 0.35.3 / libvips 8.18.3 binaries shipped with this release, the source
 download is available free of charge beside the installers:
-https://github.com/mxlzmillie/malachi-overdrive/releases/download/v2.0.10/MALACHI-OVERDRIVE-Native-Sources.tar.gz
+https://github.com/mxlzmillie/malachi-overdrive/releases/download/v2.0.11/MALACHI-OVERDRIVE-Native-Sources.tar.gz
 
 It contains original component archives, locked Rust dependency sources, build repositories,
 patches, source license/copyright notices, a URL/SHA-256 inventory, and build/replacement

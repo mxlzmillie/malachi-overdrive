@@ -1,0 +1,38 @@
+name: Prepare clean v2.0.13 release branch
+
+on:
+  push:
+    branches: [fix/windows-arm64-deterministic-waits]
+    paths:
+      - .github/workflows/prepare-clean-v2.0.13.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: fix/windows-arm64-deterministic-waits
+          fetch-depth: 0
+      - name: Preserve reviewed metadata helper outside the worktree
+        run: cp scripts/prepare-v2.0.13-metadata.py /tmp/prepare-v2.0.13-metadata.py
+      - name: Build clean release branch from origin main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main fix/windows-arm64-deterministic-waits --tags
+          git checkout -B release/v2.0.13-stability origin/main
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git cherry-pick 267811699eb0f606940bce9f99ca105c9bcf0f36
+          python3 /tmp/prepare-v2.0.13-metadata.py
+          git diff --check
+          git add package.json package-lock.json extension/manifest.json src/main/version.ts CHANGELOG.md docs/release-notes/v2.0.13.md
+          git commit -m 'MALACHI OVERDRIVE 2.0.13 ARM64 release stability'
+          node scripts/verify-public-history.mjs
+          git status --short
+          git log -3 --format='%H %an <%ae> %s'
+          git push origin HEAD:release/v2.0.13-stability

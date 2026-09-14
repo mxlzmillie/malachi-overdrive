@@ -1,7 +1,7 @@
 import { goalWorkerChat } from '../bridge.js';
 import { announceSessionFinish } from '../session/finish.js';
 import { getConfig } from '../config.js';
-import { getChatModels, refreshChatModelsAndWait } from '../chat-models.js';
+import { refreshChatModelsAndWait } from '../chat-models.js';
 import { observedChatModelSelection } from '../../shared/chat-models.js';
 /**
  * The Core connector: reading, changing and running code on this PC.
@@ -1153,6 +1153,25 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
  * can wake a worker, is what makes the ceiling survive a crash rather than a restart quietly
  * handing back a worker the prime was already told was finished.
  */
+let spawnAdmissionTail: Promise<void> = Promise.resolve();
+
+/**
+ * Fresh worker admission is globally serialized through the model-observation + durable-commit
+ * boundary. Independent owners may execute at the same time after admission, but an unvalidated
+ * staged topology must never ride inside another owner's successful snapshot.
+ */
+async function withSpawnAdmissionLock<T>(operation: () => Promise<T>): Promise<T> {
+  const before = spawnAdmissionTail.catch(() => undefined);
+  let release!: () => void;
+  spawnAdmissionTail = new Promise<void>((resolve) => { release = resolve; });
+  await before;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
 async function measureSleepingWorkers(caller: Caller): Promise<void> {
   for (const info of swarmStateForCaller(caller).agents) {
     if (info.role !== 'worker' || info.state !== 'sleeping' || !info.conversationId) continue;
@@ -1282,6 +1301,7 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
         if (!reg.agentToolsLive) return reg.featureDisabled('Multi-agent mode', 'Multi-agent mode (experimental)');
 
         if (input.action === 'spawn') {
+          return withSpawnAdmissionLock(async () => {
           if (!input.workers) return fail('agents action=spawn requires workers.');
           // One atomic operation: it either claims this exact conversation as prime and
           // creates the workers, or it creates nothing at all. There is no "create the
@@ -1301,23 +1321,19 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
             // Exact worker model requests are part of the spawn contract, not best-effort UI
             // decoration. Validate every newly invited explicit selection against ChatGPT's own
             // account picker before the swarm crosses its durable acceptance boundary or opens a
-            // single worker tab. If the restored catalog does not prove the selection, refresh it
-            // once through the existing browser discovery owner and re-check atomically.
+            // single worker tab. A durable catalog is useful for UI continuity, but it is not
+            // authority to admit fresh work after an app/account restart: refresh once through the
+            // existing browser discovery owner on every explicit selection and check that exact
+            // observation atomically.
             const selectedWorkers = staged.created.filter(
               (worker) => worker.state === 'invited' && (worker.model !== null || worker.reasoningEffort !== null)
             );
             if (selectedWorkers.length > 0) {
-              let catalog = getChatModels();
-              let unavailable = selectedWorkers.filter(
+              const catalog = await refreshChatModelsAndWait();
+              const unavailable = selectedWorkers.filter(
                 (worker) => !observedChatModelSelection(catalog.models, worker.model, worker.reasoningEffort)
               );
-              if (catalog.state !== 'ready' || unavailable.length > 0) {
-                catalog = await refreshChatModelsAndWait();
-                unavailable = selectedWorkers.filter(
-                  (worker) => !observedChatModelSelection(catalog.models, worker.model, worker.reasoningEffort)
-                );
-              }
-              if (catalog.state !== 'ready' || unavailable.length > 0) {
+              if (!catalog.fresh || catalog.state !== 'ready' || unavailable.length > 0) {
                 const wanted = unavailable.length > 0 ? unavailable : selectedWorkers;
                 const names = wanted.map((worker) =>
                   `${worker.id} (${worker.model ?? 'current model'}${worker.reasoningEffort ? `, ${worker.reasoningEffort}` : ''})`
@@ -1380,6 +1396,7 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
               workers: created.map((info) => ({ id: info.id, label: info.label, state: info.state, model: info.model, reasoning_effort: info.reasoningEffort }))
             }
           };
+          });
         }
 
         if (input.action === 'message') {

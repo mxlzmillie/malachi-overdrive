@@ -1755,6 +1755,10 @@ describe('restart', () => {
         spawn({ workers: [{ task: `work ${n}` }], caller: { conversationId: `c-prime-${n}` } });
         const worker = startWorker('worker-1', `c-worker-${n}`);
         finishAgent(worker.caller, `done ${n}`);
+        // This test is about cache pruning, not unread delivery obligations. Prove the
+        // prime consumed the report so this family is eligible for ordinary eviction.
+        offerMessages(PRIME_ID);
+        acknowledgeOffers(PRIME_ID, false, Number.POSITIVE_INFINITY);
         expect(releaseQuiescentRun()).toBe(true);
         vi.setSystemTime(Date.now() + 1_000);
       };
@@ -1777,6 +1781,54 @@ describe('restart', () => {
     } finally {
       vi.useRealTimers();
       await setEnabled(true);
+    }
+  });
+
+  it('never prunes a dormant family while its prime still has an unread worker result', async () => {
+    await setEnabled(true, 1);
+    try {
+      for (let n = 1; n <= 17; n++) {
+        spawn({ workers: [{ task: `unread work ${n}` }], caller: { conversationId: `c-unread-prime-${n}` } });
+        const worker = startWorker('worker-1', `c-unread-worker-${n}`);
+        finishAgent(worker.caller, `unread result ${n}`);
+        expect(releaseQuiescentRun()).toBe(true);
+      }
+
+      const saved = snapshotSwarm()!;
+      expect(saved.dormantRuns).toHaveLength(17);
+      expect(saved.dormantRuns?.[0]?.primeConversationId).toBe('c-unread-prime-1');
+
+      resetAgentsForTests();
+      restoreSwarm(saved);
+      expect(snapshotSwarm()?.dormantRuns).toHaveLength(17);
+      expect(offerMessagesForConversation('c-unread-prime-1')?.messages.map((message) => message.text).join('')).toContain(
+        'unread result 1'
+      );
+    } finally {
+      await setEnabled(true);
+    }
+  });
+
+  it('restores an active worker as detached until fresh page or tool evidence returns', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-13T20:00:00Z'));
+      startSwarm(1);
+      startWorker('worker-1', 'c-worker-restart-active');
+      const saved = snapshotSwarm();
+
+      resetAgentsForTests();
+      restoreSwarm(saved);
+      expect(swarmState().agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+        state: 'detached',
+        revivable: true
+      });
+
+      const slept = sleepSilentDetachedWorkers(Date.now() + DETACHED_SILENCE_MS + 1);
+      expect(slept).toHaveLength(1);
+      expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.state).toBe('sleeping');
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -1818,7 +1870,7 @@ describe('restart', () => {
 
     expect(swarmRunning()).toBe(true);
     expect(swarmStateForCaller(primeB).agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
-      state: 'active',
+      state: 'detached',
       conversationId: 'c-worker-b-active-restore'
     });
     const aHistory = swarmStateForCaller(prime).agents;
@@ -1861,7 +1913,7 @@ describe('restart', () => {
     restoreSwarm(snapshot);
 
     expect(pendingWorkerSpawns()).toEqual([]);
-    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.state).toBe('active');
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.state).toBe('detached');
     expect(identify({ conversationId: 'c-worker-1' }).id).toBe('worker-1');
   });
 
@@ -2301,14 +2353,21 @@ describe('through the MCP endpoint', () => {
 
   it('atomically admits three workers only after both requested GPT-6 Pro lanes are account-proven', async () => {
     await setEnabled(true, 3);
+    const currentModels = [
+      { id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] },
+      { id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high'], aliases: ['gpt-5-6-thinking'] }
+    ];
     requestChatModels();
     expect(observeChatModels({
       nonce: pendingChatModelRequest()!.nonce,
-      models: [
-        { id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] },
-        { id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high'], aliases: ['gpt-5-6-thinking'] }
-      ]
+      models: currentModels
     })).toBe(true);
+    configureChatModelDiscovery({
+      changed: () => {},
+      wake: async (nonce) => {
+        expect(observeChatModels({ nonce, models: currentModels })).toBe(true);
+      }
+    });
 
     const text = await asChat(PRIME_CHAT, 'spawn', {
       workers: [
@@ -2324,6 +2383,65 @@ describe('through the MCP endpoint', () => {
       expect.objectContaining({ id: 'worker-2', model: 'gpt-6-pro', reasoningEffort: 'pro' }),
       expect.objectContaining({ id: 'worker-3', model: null, reasoningEffort: null })
     ]);
+  });
+
+  it('refreshes a previously ready catalog before admitting an explicit worker model', async () => {
+    await setEnabled(true, 3);
+    requestChatModels();
+    expect(observeChatModels({
+      nonce: pendingChatModelRequest()!.nonce,
+      models: [{ id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] }]
+    })).toBe(true);
+
+    const currentModels = [
+      { id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high'], aliases: ['gpt-5-6-thinking'] }
+    ];
+    const refreshes: string[] = [];
+    configureChatModelDiscovery({
+      changed: () => {},
+      wake: async (nonce) => {
+        refreshes.push(nonce);
+        expect(observeChatModels({ nonce, models: currentModels })).toBe(true);
+      }
+    });
+    const published: unknown[] = [];
+    onSpawnRequest((workers) => published.push(...workers));
+
+    const text = await asChat(PRIME_CHAT, 'spawn', {
+      workers: [{ label: 'Pro A', task: 'overnight stability pass A', model: 'gpt-6-pro', reasoning_effort: 'pro' }]
+    });
+
+    expect(refreshes).toHaveLength(1);
+    expect(text).toContain('MODEL_UNAVAILABLE');
+    expect(text).toContain('No workers were created');
+    expect(swarmRunning()).toBe(false);
+    expect(pendingWorkerSpawns()).toEqual([]);
+    expect(published).toEqual([]);
+  });
+
+  it('rejects cached GPT-6 Pro when the live account refresh itself fails', async () => {
+    await setEnabled(true, 3);
+    requestChatModels();
+    expect(observeChatModels({
+      nonce: pendingChatModelRequest()!.nonce,
+      models: [{ id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] }]
+    })).toBe(true);
+    configureChatModelDiscovery({
+      changed: () => {},
+      wake: async () => { throw new Error('synthetic live picker wake failure'); }
+    });
+    const published: unknown[] = [];
+    onSpawnRequest((workers) => published.push(...workers));
+
+    const text = await asChat(PRIME_CHAT, 'spawn', {
+      workers: [{ task: 'must not inherit stale Astra proof', model: 'gpt-6-pro', reasoning_effort: 'pro' }]
+    });
+
+    expect(text).toContain('MODEL_UNAVAILABLE');
+    expect(text).toContain('No workers were created');
+    expect(swarmRunning()).toBe(false);
+    expect(pendingWorkerSpawns()).toEqual([]);
+    expect(published).toEqual([]);
   });
 
   it('opens zero workers when a fresh account refresh still cannot prove GPT-6 Pro', async () => {
@@ -2353,6 +2471,53 @@ describe('through the MCP endpoint', () => {
     expect(swarmRunning()).toBe(false);
     expect(pendingWorkerSpawns()).toEqual([]);
     expect(published).toEqual([]);
+  });
+
+  it('serializes spawn admission so a rejected model request cannot ride another owner durable', async () => {
+    await setEnabled(true, 1);
+    const solOnly = [{ id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high'], aliases: ['gpt-5-6-thinking'] }];
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    let sawRefresh!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => { sawRefresh = resolve; });
+    configureChatModelDiscovery({
+      changed: () => {},
+      wake: async (nonce) => {
+        sawRefresh();
+        await refreshGate;
+        expect(observeChatModels({ nonce, models: solOnly })).toBe(true);
+      }
+    });
+    const opened: Array<{ primeConversationId: string }> = [];
+    const dispose = onSpawnRequest((workers) => opened.push(...workers));
+    try {
+      const rejectedA = asChat('prime-model-pending', 'spawn', {
+        workers: [{ task: 'must fail closed', model: 'gpt-6-pro', reasoning_effort: 'pro' }]
+      });
+      await refreshStarted;
+
+      let bSettled = false;
+      const acceptedB = asChat('prime-independent', 'spawn', { workers: [{ task: 'independent accepted work' }] })
+        .then((text) => { bSettled = true; return text; });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(bSettled).toBe(false);
+      // A is staged but unpublished and B has not entered admission yet. No public/durable
+      // snapshot may contain either owner at this point.
+      expect(snapshotSwarm()).toBeNull();
+
+      releaseRefresh();
+      const [aText, bText] = await Promise.all([rejectedA, acceptedB]);
+      expect(aText).toContain('MODEL_UNAVAILABLE');
+      expect(bText).toContain('1 worker(s) matched');
+      expect(currentRunId('prime-model-pending')).toBeNull();
+      expect(currentRunId('prime-independent')).toBeTypeOf('string');
+      expect(snapshotSwarm()?.activeRuns?.map((run) => run.primeConversationId)).toEqual(['prime-independent']);
+      expect(opened).toEqual([expect.objectContaining({ primeConversationId: 'prime-independent' })]);
+    } finally {
+      dispose();
+      await setEnabled(true);
+    }
   });
 
   it('is identified by exact request-id evidence that arrived before the call it names', async () => {

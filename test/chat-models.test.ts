@@ -152,6 +152,51 @@ it('waits on one explicit account refresh and returns its observed model catalog
   expect(pending).not.toBeNull();
   const pro = [{ id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] }];
   expect(observeChatModels({ nonce: pending!.nonce, models: pro })).toBe(true);
-  await expect(waiting).resolves.toMatchObject({ state: 'ready', models: pro });
+  await expect(waiting).resolves.toMatchObject({ state: 'ready', models: pro, fresh: true });
   expect(wake).toHaveBeenCalledTimes(1);
+});
+
+it('does not treat a restored ready catalog as fresh when the explicit browser wake fails', async () => {
+  requestChatModels();
+  expect(observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models })).toBe(true);
+  configureChatModelDiscovery({
+    changed: () => {},
+    wake: async () => { throw new Error('synthetic browser wake failure'); }
+  });
+
+  await expect(refreshChatModelsAndWait()).resolves.toMatchObject({
+    state: 'ready',
+    models,
+    fresh: false,
+    error: expect.stringMatching(/synthetic browser wake failure/)
+  });
+});
+
+it('does not treat cached choices as fresh when the exact refresh returns no model proof', async () => {
+  requestChatModels();
+  expect(observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models })).toBe(true);
+  configureChatModelDiscovery({
+    changed: () => {},
+    wake: async (nonce) => {
+      expect(observeChatModels({ nonce, models: null, error: 'inspection_failed' })).toBe(true);
+    }
+  });
+
+  await expect(refreshChatModelsAndWait()).resolves.toMatchObject({ state: 'ready', models, fresh: false });
+});
+
+it('does not treat cached choices as fresh when the exact refresh times out', async () => {
+  requestChatModels();
+  expect(observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models })).toBe(true);
+  configureChatModelDiscovery({ wake: async () => {}, changed: () => {} });
+
+  const waiting = refreshChatModelsAndWait();
+  await Promise.resolve();
+  await vi.advanceTimersByTimeAsync(120_100);
+  await expect(waiting).resolves.toMatchObject({
+    state: 'ready',
+    models,
+    fresh: false,
+    error: expect.stringMatching(/timed out/)
+  });
 });

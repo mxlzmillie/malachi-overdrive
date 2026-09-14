@@ -69,9 +69,9 @@ const MAX_LABEL_CHARS = 60;
 /**
  * How long a ChatGPT model slug in a worker's `model` field may be.
  *
- * Slugs are OpenAI's vocabulary, not ours, so this is a transport bound, not a menu: anything
- * shaped like a slug passes through to the fresh-chat URL untouched, and an unknown slug
- * simply opens with the account default rather than failing the spawn.
+ * Slugs are OpenAI's vocabulary, not ours, so this is a transport bound, not a menu. Exact
+ * model/effort admission is owned by the account-observed picker gate at the MCP boundary;
+ * syntax validation here must not invent a second provider catalog.
  */
 const MAX_MODEL_CHARS = 80;
 const MODEL_SLUG_RE = /^[A-Za-z0-9._-]{1,80}$/;
@@ -989,7 +989,12 @@ function parkRun(run: Run | null, reason: string): boolean {
  */
 function pruneDormantRuns(now = Date.now()): boolean {
   const candidates = [...dormantRuns.values()]
-    .filter((dormant) => !dormant.transfer)
+    // Unacknowledged broker rows are delivery obligations, not cache. Retaining one extra
+    // family is cheaper than deleting a worker result the prime has never received.
+    .filter((dormant) =>
+      !dormant.transfer &&
+      ![...dormant.agents.values()].some((agent) => agent.queue.some((message) => message.ackedAt === null))
+    )
     .sort((a, b) => a.parkedAt - b.parkedAt);
   const evict = candidates.filter(
     (dormant, index) => now - dormant.parkedAt >= DORMANT_RUN_TTL_MS || candidates.length - index > MAX_DORMANT_RUNS
@@ -1128,8 +1133,8 @@ function settleSpawnStage(stage: SpawnStageState, accepted: boolean): void {
  *
  * Malformed input fails the whole spawn rather than opening a worker under a model nobody
  * asked for: like every other spawn validation, this runs before the first mutation, so a
- * rejection leaves zero workers behind. A well-formed slug ChatGPT does not recognise is
- * not ours to refuse — the fresh chat simply opens with the default.
+ * rejection leaves zero workers behind. Availability is deliberately checked later against
+ * ChatGPT's current account-observed picker before the staged spawn may commit.
  */
 function normalizeModel(index: number, value: string | null | undefined): string | null {
   if (value === undefined || value === null) return null;
@@ -1144,10 +1149,10 @@ function normalizeModel(index: number, value: string | null | undefined): string
 }
 
 /**
- * Whether a string is shaped like a ChatGPT model slug. The single vocabulary check for
- * worker models, shared by the broker and the bridge's durable restore: slugs are OpenAI's
- * vocabulary, so anything shaped like one passes through and an unknown one simply opens
- * with the account default.
+ * Whether a string is shaped like a ChatGPT model slug. The single syntax check for worker
+ * models, shared by the broker and the bridge's durable restore. This intentionally says
+ * nothing about account availability; the MCP admission boundary proves that separately from
+ * ChatGPT's current picker before a fresh worker can be published.
  */
 export function isModelSlug(value: unknown): value is string {
   return typeof value === 'string' && MODEL_SLUG_RE.test(value);
@@ -2366,6 +2371,9 @@ export interface WorkerRevival {
   runId: string;
   text: string;
   messageIds: string[];
+  /** Exact worker selection to re-prove before a revived chat may send new work. */
+  model: string | null;
+  reasoningEffort: ReasoningEffort | null;
 }
 
 let reviveRequest: ((revivals: WorkerRevival[]) => void) | null = null;
@@ -2400,7 +2408,9 @@ export function pendingWorkerRevivals(): WorkerRevival[] {
       runId: run.runId,
       primeConversationId: run.primeConversationId,
       text: plan.text,
-      messageIds: plan.messageIds
+      messageIds: plan.messageIds,
+      model: agent.info.model,
+      reasoningEffort: agent.info.reasoningEffort
     });
   }
   return out;
@@ -4009,6 +4019,18 @@ export function restoreSwarm(snapshot: SwarmSnapshot | null): void {
           transfer: null,
           primeGoneAt: null
         };
+        // Process restart destroys page liveness. A persisted `active` row therefore comes back
+        // detached until the exact chat proves itself again. Tool calls may keep extending the
+        // detached silence clock; a page/turn sighting restores active immediately. This gives
+        // an abruptly lost worker a bounded escape instead of consuming a slot forever.
+        const restoredAt = Date.now();
+        for (const agent of run.agents.values()) {
+          if (agent.info.role !== 'worker' || agent.info.state !== 'active') continue;
+          agent.info.state = 'detached';
+          agent.info.detachedAt = restoredAt;
+          agent.info.revivable = true;
+          repaired = true;
+        }
         if (runs.has(run.runId)) { repaired = true; continue; }
         runs.set(run.runId, run);
         stampOwner(run);

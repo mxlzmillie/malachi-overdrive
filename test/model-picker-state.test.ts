@@ -139,6 +139,22 @@ it('confirms the exact model and effort and refuses visible upgrade-only entries
   expect(await f.api.selectModelSettings('gpt-6-pro', 'pro')).toBe(false);
   expect(f.state.currentSelection).toMatchObject({ modelSlug: 'future-model', thinkingEffort: 'ultra' });
 });
+it('keeps exact native model proof mounted through Send and detects later picker drift', async () => {
+  const f = fixture();
+  expect(await f.api.selectModelSettings('future-model', 'ultra', () => true, true)).toBe(true);
+  expect(page.window.document.querySelector('[data-testid="composer-intelligence-picker-content"]')).not.toBeNull();
+  expect(f.api.modelSettingsMatch('future-model', 'ultra')).toBe(true);
+
+  // Simulate a provider/user selection change after the original confirmation. The new
+  // selection is valid in its own right, but it invalidates the requested worker identity.
+  expect(await f.api.selectModelSettings('future-model', 'low', () => true, true)).toBe(true);
+  expect(f.api.modelSettingsMatch('future-model', 'ultra')).toBe(false);
+  expect(f.api.modelSettingsMatch('future-model', 'low')).toBe(true);
+
+  f.api.closeModelSettings();
+  expect(page.window.document.querySelector('[data-testid="composer-intelligence-picker-content"]')).toBeNull();
+});
+
 it('ends a long unavailable-model scan at one deadline before the desktop input claim expires', async () => {
   vi.useFakeTimers();
   try {
@@ -194,7 +210,7 @@ it('invalidates mounted selection proof when provider state becomes unrecognized
     });
     return f.api.visibleModelSelection();
   };
-  expect(await read()).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+  expect(await read()).toEqual({ model: 'gpt-5-6-thinking', family: 'gpt-5-6-thinking', reasoningEffort: 'high' });
   f.state.currentSelection.thinkingEffort = 'unknown-provider-value';
   expect(await read()).toBeNull();
 });

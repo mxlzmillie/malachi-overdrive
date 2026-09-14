@@ -11,6 +11,20 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.12] — 2026-09-14
+
+- Tightened explicit worker-model admission so every new model/reasoning selection is proven against a **fresh account picker observation for that spawn**. A ready catalog restored from an earlier app/account session is presentation continuity only and can no longer authorize a GPT-6 Pro/Astra worker.
+- Added a regression that seeds a previously valid GPT-6 Pro catalog, changes the freshly observed account to Sol-only, and proves the whole spawn fails with `MODEL_UNAVAILABLE`, zero worker publication, and no browser bootstrap.
+- Clarified the broker's model-slug contract: syntax validation never grants model availability; the account-observed picker remains the single availability authority.
+- Serialized fresh worker admission across independent primes so a model-unvalidated staged spawn cannot become durable through another owner's successful persistence barrier.
+- Carries the app-side worker command lease into the browser and rechecks it at the irreversible Send boundary, preventing a suspended/hidden worker page from sending after its broker authority expired.
+- Keeps the exact native model picker proof mounted through Send, rechecks the requested model/reasoning immediately before dispatch, and re-proves the same selection when a sleeping worker is revived.
+- Restores persisted active workers as detached until fresh page/tool evidence returns, giving abrupt app+browser loss a bounded silence recovery path instead of consuming a worker slot forever.
+- Protects dormant worker families with unread broker messages from TTL/capacity pruning so unacknowledged worker results are never discarded as cache.
+- Carries forward the 2.0.11 overnight stability behavior: three fresh-install worker slots, atomic two-Astra-plus-verifier admission, same-tab temporary Pro-throttle recovery, durable worker messaging/revival, and bounded long-run recovery.
+
+See [the full release notes](docs/release-notes/v2.0.12.md).
+
 ## [2.0.11] — 2026-09-12
 
 - Added account-proven GPT-6 Pro/Astra worker admission: explicit Pro workers are validated against ChatGPT's observed model catalog before any worker is published or opened, with no silent fallback.

@@ -1608,7 +1608,7 @@ var CLF_DOM = (() => {
     }, false);
   }
 
-  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true } = {}) {
+  async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true, afterDispatch = null } = {}) {
     try {
       const box = composer();
       if (!box || !box.isConnected || !stillCurrent() || generating() || stopButton()) return false;
@@ -1701,6 +1701,7 @@ var CLF_DOM = (() => {
             box.dispatchEvent(new KeyboardEvent('keydown', key));
             box.dispatchEvent(new KeyboardEvent('keyup', key));
           }
+          if (typeof afterDispatch === 'function') afterDispatch();
           // Close the race where the acceptance mutation happens synchronously inside the
           // click/keyboard handler before MutationObserver gets its microtask callback.
           check();
@@ -1936,10 +1937,24 @@ var CLF_DOM = (() => {
   // Removing that native node also removes the evidence; never cache across navigation.
   function visibleModelSelection() {
     const node = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
-    const model = node?.getAttribute('data-clf-selected-model'), reasoningEffort = node?.getAttribute('data-clf-selected-effort');
-    return model && /^[a-zA-Z0-9._-]{1,80}$/.test(model) && ['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(reasoningEffort)
-      ? { model, reasoningEffort } : null;
+    const model = node?.getAttribute('data-clf-selected-model'),
+      family = node?.getAttribute('data-clf-selected-family'),
+      reasoningEffort = node?.getAttribute('data-clf-selected-effort');
+    return model && /^[a-zA-Z0-9._-]{1,80}$/.test(model) && family && /^[a-zA-Z0-9._-]{1,80}$/.test(family) &&
+      ['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(reasoningEffort)
+      ? { model, family, reasoningEffort } : null;
   }
+  function modelSettingsMatch(model, effort) {
+    if (!model && !effort) return true;
+    const selected = visibleModelSelection();
+    if (!selected || (effort && selected.reasoningEffort !== effort)) return false;
+    if (!model) return true;
+    const requested = String(model).trim();
+    return selected.model === requested || selected.family === requested ||
+      normalizeModelLabel(selected.model) === normalizeModelLabel(requested) ||
+      normalizeModelLabel(selected.family) === normalizeModelLabel(requested);
+  }
+  function closeModelSettings() { modelPickerAccess(() => true).close(); }
   /** Account model discovery belongs to Chat; Work mounts a different picker.
    * The caller owns one idle document and verifies draft/epoch before and after this transition. */
   async function prepareChatModelSurface(stillCurrent = () => true) {
@@ -2003,7 +2018,7 @@ var CLF_DOM = (() => {
     if (!restored) failure('restore_failed');
     return restored && stillCurrent() && result.size ? [...result.values()] : null;
   }
-  async function selectModelSettings(model, effort, stillCurrent = () => true) {
+  async function selectModelSettings(model, effort, stillCurrent = () => true, keepOpen = false) {
     // An existing conversation may inherit its native picker (including Work).
     // No override means no picker mutation; it still belongs to this document epoch.
     if (!model && !effort) return stillCurrent();
@@ -2029,7 +2044,9 @@ var CLF_DOM = (() => {
       return false;
     } finally {
       if (!selected && stillCurrent() && await ui.version(original.version)) await ui.bucket(original.currentBucket);
-      ui.close();
+      // A worker bootstrap may keep this exact native proof mounted until Send. Closing first
+      // creates a model-drift gap where the journal can claim a selection no longer active.
+      if (!selected || !keepOpen) ui.close();
     }
   }
 
@@ -2062,6 +2079,8 @@ var CLF_DOM = (() => {
     prepareChatModelSurface,
     newChatControl,
     visibleModelSelection,
+    modelSettingsMatch,
+    closeModelSettings,
     inspectModelSettings,
     uploadImages,
     captureComposerDraft,

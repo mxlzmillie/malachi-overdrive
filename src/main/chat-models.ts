@@ -22,6 +22,8 @@ let deadline: ReturnType<typeof setTimeout> | null = null;
 let launch: { nonce: string; allowOpen: boolean; work: Promise<void> } | null = null;
 let changed = (): void => {};
 let wake: ((nonce: string, allowOpen: boolean) => Promise<void>) | null = null;
+/** Exact discovery nonce whose positive model observation most recently became authoritative. */
+let lastReadyObservationNonce: string | null = null;
 const waiters = new Set<() => void>();
 function publishChanged(): void {
   changed();
@@ -104,23 +106,34 @@ export async function startChatModelDiscovery(allowOpen = true): Promise<ChatMod
  * any worker tabs. Reuse the one existing discovery request and wait on its publication boundary;
  * do not poll or invent provider choices.
  */
-export async function refreshChatModelsAndWait(): Promise<ChatModelCatalog> {
-  await startChatModelDiscovery(true);
+export type RefreshedChatModelCatalog = ChatModelCatalog & { fresh: boolean };
+
+export async function refreshChatModelsAndWait(): Promise<RefreshedChatModelCatalog> {
+  // Capture the exact nonce before the browser wake: a fast observation may complete during
+  // startChatModelDiscovery(), clearing `request` before that promise returns. Freshness is
+  // therefore tied to the nonce we asked for, never inferred from the catalog's ready state.
+  requestChatModels(true);
   const pending = request;
-  if (!pending) return getChatModels();
+  if (!pending) return { ...getChatModels(), fresh: false };
   const nonce = pending.nonce;
+  await startChatModelDiscovery(true);
+  const result = (): RefreshedChatModelCatalog => ({
+    ...getChatModels(),
+    fresh: lastReadyObservationNonce === nonce
+  });
+  if (request?.nonce !== nonce) return result();
   return new Promise((resolve) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const finish = () => {
       if (request?.nonce === nonce && catalog.state === 'pending' && Date.now() < pending.expiresAt) return;
       waiters.delete(finish);
       if (timer) clearTimeout(timer);
-      resolve(getChatModels());
+      resolve(result());
     };
     waiters.add(finish);
     timer = setTimeout(() => {
       waiters.delete(finish);
-      resolve(getChatModels());
+      resolve(result());
     }, Math.max(1, pending.expiresAt - Date.now() + 50));
     timer.unref?.();
     finish();
@@ -142,6 +155,7 @@ export function observeChatModels(raw: unknown): boolean {
     : 'ChatGPT model choices could not be read. Open ChatGPT in the selected browser and check its model picker, then retry.';
   if (models) {
     catalog = { ...catalog, state: 'ready', models, observedAt: Date.now(), error: undefined };
+    lastReadyObservationNonce = request.nonce;
     writeDurableSoon('chat-models', { observedAt: catalog.observedAt, models });
   } else failed(error);
   request = null;
@@ -150,7 +164,7 @@ export function observeChatModels(raw: unknown): boolean {
 }
 export function resetChatModelsForTests(): void {
   if (deadline) clearTimeout(deadline); deadline = null; launch = null;
-  request = null; catalog = { state: 'unknown', requestedAt: null, observedAt: null, models: [] };
+  request = null; lastReadyObservationNonce = null; catalog = { state: 'unknown', requestedAt: null, observedAt: null, models: [] };
   for (const waiter of [...waiters]) waiter();
   waiters.clear();
 }

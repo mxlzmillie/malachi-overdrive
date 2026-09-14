@@ -251,7 +251,15 @@ async function harness(
           return spoke ? own : { ok: true, data: arming ? { armed: true } : { allowed: true } };
         }
         const answer = reply.get(message.type);
-        return answer ? answer(message) : { ok: false, error: 'unknown_message' };
+        const value: any = answer ? await answer(message) : { ok: false, error: 'unknown_message' };
+        // Real v2.0.12 bridges put the absolute app-side lease on every worker/revival redeem.
+        // Most fixtures are about another boundary, so synthesize that production invariant here
+        // unless a test deliberately supplies its own expiry.
+        if (message.type === 'redeem' && value?.command &&
+            ['worker', 'revive'].includes(value.command.type) && value.command.expiresAt === undefined) {
+          value.command = { ...value.command, expiresAt: window.Date.now() + 10 * 60_000 };
+        }
+        return value;
       },
       onMessage: {
         addListener(listener: typeof runtimeListener) {
@@ -327,9 +335,14 @@ async function harness(
   };
 
   window.eval(domSource);
+  // Most content-script fixtures isolate orchestration from native picker mechanics. Tests that
+  // exercise model drift override these two functions explicitly; model-picker-state.test.ts
+  // covers the real DOM implementation.
+  window.CLF_DOM.modelSettingsMatch = () => true;
+  window.CLF_DOM.closeModelSettings = () => undefined;
   // Ordinary degraded-lifecycle fixtures explicitly supply current native model proof.
   // The default remains an unknown/closed picker, matching the real page.
-  if (confirmedNonPro) window.CLF_DOM.visibleModelSelection = () => ({ model: 'GPT-5.6 Sol', reasoningEffort: 'high' });
+  if (confirmedNonPro) window.CLF_DOM.visibleModelSelection = () => ({ model: 'GPT-5.6 Sol', family: '5.6', reasoningEffort: 'high' });
   window.eval(contentSource);
   if (!hook) throw new Error('content.js did not expose its test hook');
 
@@ -10911,6 +10924,54 @@ describe('the fresh chat the app opened', () => {
     expect(live.sent.filter(message => message.type === 'ack')).toEqual([
       expect.objectContaining({ id: 'cmd-pro-throttle', status: 'sent', conversationId: workerChat })
     ]);
+  });
+
+  it('never sends a worker bootstrap after its app-side lease has expired', async () => {
+    let release!: (value: unknown) => void;
+    const redeemed = new Promise(resolve => { release = resolve; });
+    let sends = 0;
+    live = await harness('https://chatgpt.com/?clf=cmd-expired-worker', {
+      redeem: () => redeemed,
+      ack: () => ({ ok: true })
+    }, (document) => {
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { sends++; });
+    });
+    release({ ok: true, command: {
+      id: 'cmd-expired-worker', type: 'worker', text: 'Never send this stale task', agent: 'worker-1',
+      model: 'gpt-6-pro', reasoningEffort: 'pro', expiresAt: live.window.Date.now() - 1
+    } });
+    await settle(300);
+    expect(sends).toBe(0);
+    expect(live.sent.filter(message => message.type === 'ack')).toContainEqual(
+      expect.objectContaining({ id: 'cmd-expired-worker', status: 'failed', error: expect.stringMatching(/lease expired/i) })
+    );
+  });
+
+  it('rechecks the exact requested model immediately before Send and refuses drift', async () => {
+    let release!: (value: unknown) => void;
+    const redeemed = new Promise(resolve => { release = resolve; });
+    let sends = 0;
+    live = await harness('https://chatgpt.com/?clf=cmd-model-drift', {
+      redeem: () => redeemed,
+      ack: () => ({ ok: true })
+    }, (document) => {
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { sends++; });
+    });
+    (live.window as any).CLF_DOM.selectModelSettings = vi.fn(async () => true);
+    (live.window as any).CLF_DOM.closeModelSettings = vi.fn();
+    (live.window as any).CLF_DOM.modelSettingsMatch = vi.fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    release({ ok: true, command: {
+      id: 'cmd-model-drift', type: 'worker', text: 'Model must stay exact', agent: 'worker-1',
+      model: 'gpt-6-pro', reasoningEffort: 'pro', expiresAt: live.window.Date.now() + 60_000
+    } });
+    await settle(400);
+    expect(sends).toBe(0);
+    expect(live.sent.filter(message => message.type === 'ack')).toContainEqual(
+      expect.objectContaining({ id: 'cmd-model-drift', status: 'failed', error: expect.stringMatching(/changed immediately before Send/i) })
+    );
+    expect((live.window as any).CLF_DOM.closeModelSettings).toHaveBeenCalled();
   });
 
   it.each([true, false])('journals the verified worker model only after successful bootstrap (%s)', async confirmed => {

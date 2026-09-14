@@ -1315,7 +1315,11 @@
     let state = null;
     try { state = readPickerSnapshot(node); } catch { /* Unknown state invalidates prior proof. */ }
     const selected = state?.choices.find(choice => choice.bucket === state.currentBucket && choice.available);
-    for (const [attribute, value] of [['data-clf-selected-model', selected?.id], ['data-clf-selected-effort', selected?.effort]]) {
+    for (const [attribute, value] of [
+      ['data-clf-selected-model', selected?.id],
+      ['data-clf-selected-family', selected?.familyId],
+      ['data-clf-selected-effort', selected?.effort]
+    ]) {
       if (!value) node?.removeAttribute(attribute);
       else if (node.getAttribute(attribute) !== value) node.setAttribute(attribute, value);
     }

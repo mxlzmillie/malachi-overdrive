@@ -397,6 +397,9 @@ type CommandSpec =
        * supersede test and the same-wake dedupe all at once.
        */
       wake: string;
+      /** Requested worker selection is re-proved before the revived chat may send. */
+      model: string | null;
+      reasoningEffort: ReasoningEffort | null;
     }
   /**
    * The replacement chat for a Compact & Resume.
@@ -512,6 +515,8 @@ export interface BridgeCommand {
    * the opposite precondition — a chat with no conversation of its own yet.
    */
   conversationId: string | null;
+  /** Absolute app-side lease boundary for worker/revival Send authority. */
+  expiresAt: number | null;
 }
 
 let server: http.Server | null = null;
@@ -3916,7 +3921,15 @@ async function startBridgeOnce(epoch: number): Promise<number | null> {
       // is the first moment anything can reopen that tab for it.
       dropReviveRequestListener?.();
       dropReviveRequestListener = onReviveRequest((revivals: WorkerRevival[]) => {
-        for (const revival of revivals) queueWorkerRevival(revival.id, revival.conversationId, revival.messageIds, revival.runId);
+        for (const revival of revivals)
+          queueWorkerRevival(
+            revival.id,
+            revival.conversationId,
+            revival.messageIds,
+            revival.runId,
+            revival.model,
+            revival.reasoningEffort
+          );
       });
       // When a run ends — cleared in the app, finished, or taken over by another chat —
       // its worker chats must stop existing everywhere at once. A queued bootstrap that
@@ -4578,7 +4591,9 @@ export function queueWorkerRevival(
   agent: string,
   conversationId: string,
   wake: readonly string[],
-  runId: string
+  runId: string,
+  model: string | null = null,
+  reasoningEffort: ReasoningEffort | null = null
 ): BridgeCommand | null {
   // Same rule as a bootstrap: authority for one concrete broker incarnation, or nothing.
   if (!runId || !conversationId || !swarmRunning(runId)) return null;
@@ -4594,7 +4609,9 @@ export function queueWorkerRevival(
     agent,
     conversationId,
     runId,
-    wake: wake.join(' ')
+    wake: wake.join(' '),
+    model,
+    reasoningEffort
   });
   // Start the waking clock at broker admission, not only after a browser accepts the command.
   armDeadline(command);
@@ -7066,7 +7083,11 @@ function revivalFor(agent: string, runId: string): WorkerRevival | null {
  */
 function describe(command: Command, client: string | null, claimedSummary?: string): BridgeCommand {
   const spec = command.spec;
-  if (spec.type === 'stop') return { id: command.id, kind: 'stop-turn', type: 'stop', text: '', agent: null, model: null, reasoningEffort: null, conversationId: spec.conversationId, turnId: spec.turnId };
+  if (spec.type === 'stop')
+    return {
+      id: command.id, kind: 'stop-turn', type: 'stop', text: '', agent: null, model: null,
+      reasoningEffort: null, conversationId: spec.conversationId, turnId: spec.turnId, expiresAt: null
+    };
   // A resume's claim is persisted by /commands/redeem before this renderer is called. A
   // command shown to app/UI code without a browser document still carries no brief at all.
   const text = spec.type === 'resume'
@@ -7080,11 +7101,15 @@ function describe(command: Command, client: string | null, claimedSummary?: stri
     type: spec.type,
     text,
     agent: spec.type === 'resume' ? null : spec.agent,
-    model: spec.type === 'worker' ? spec.model : null,
-    reasoningEffort: spec.type === 'worker' ? spec.reasoningEffort : null,
+    model: spec.type === 'worker' || spec.type === 'revive' ? spec.model : null,
+    reasoningEffort: spec.type === 'worker' || spec.type === 'revive' ? spec.reasoningEffort : null,
     // The fence the page enforces before it types. Only a revival has one: the other two
     // kinds open a chat that does not exist yet, so there is nothing to compare against.
-    conversationId: spec.type === 'revive' ? spec.conversationId : null
+    conversationId: spec.type === 'revive' ? spec.conversationId : null,
+    expiresAt:
+      spec.type === 'worker' || spec.type === 'revive'
+        ? Date.now() + Math.max(0, commandDeadlineDelay(command))
+        : null
   };
 }
 
@@ -7400,8 +7425,10 @@ function restoredCommandSpec(version: number, raw: Partial<CommandSpec>): Comman
     const revive = raw as Extract<CommandSpec, { type: 'revive' }>;
     if (!swarmRunning(revive.runId)) return null;
     if (agentConversation(revive.agent, revive.runId) !== revive.conversationId) return null;
-    const revivalState = swarmState(revive.runId).agents.find((entry) => entry.id === revive.agent && entry.role === 'worker')?.state;
-    if (revivalState !== 'waking' && revivalState !== 'active') return null;
+    const revivalWorker = swarmState(revive.runId).agents.find(
+      (entry) => entry.id === revive.agent && entry.role === 'worker'
+    );
+    if (revivalWorker?.state !== 'waking' && revivalWorker?.state !== 'active') return null;
     return {
       type: 'revive',
       agent: revive.agent,
@@ -7409,7 +7436,11 @@ function restoredCommandSpec(version: number, raw: Partial<CommandSpec>): Comman
       runId: revive.runId,
       // A row written before wakes were named restores as the unnamed wake. The live broker
       // still holds the messages, so the next real wake for this worker supersedes it.
-      wake: typeof revive.wake === 'string' ? revive.wake : ''
+      wake: typeof revive.wake === 'string' ? revive.wake : '',
+      // The broker is authoritative for requested model identity across restarts. Never trust
+      // a stale command snapshot to invent or preserve a different execution selection.
+      model: revivalWorker.model,
+      reasoningEffort: revivalWorker.reasoningEffort
     };
   }
   if (

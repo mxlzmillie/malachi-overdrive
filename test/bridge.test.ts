@@ -2458,7 +2458,7 @@ describe('delivering a bootstrap', () => {
    */
   it("routes revival to the worker's own chat without opening a duplicate, and treats the typed message as an offer", async () => {
     await pair();
-    spawn({ workers: [{ task: 'write the audit' }], caller: { conversationId: PRIME_CHAT } });
+    spawn({ workers: [{ task: 'write the audit', model: 'gpt-6-pro', reasoning_effort: 'pro' }], caller: { conversationId: PRIME_CHAT } });
     const bootstrap = await redeem();
     const conversationId = 'cafecafe-7654-3210-fedc-ba9876543210';
     await request('POST', '/commands/ack', {
@@ -2485,7 +2485,14 @@ describe('delivering a bootstrap', () => {
       body: { id, client: 'tab-worker-again', conversationId }
     });
     expect(claimed.status).toBe(200);
-    expect(claimed.body.command).toMatchObject({ id, agent: 'worker-1', conversationId });
+    expect(claimed.body.command).toMatchObject({
+      id,
+      agent: 'worker-1',
+      conversationId,
+      model: 'gpt-6-pro',
+      reasoningEffort: 'pro',
+      expiresAt: expect.any(Number)
+    });
     // What gets typed is the prime's own words, as a user message in the worker's chat.
     expect(claimed.body.command.text).toContain('now do the second half');
 

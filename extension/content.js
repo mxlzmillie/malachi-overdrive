@@ -753,8 +753,8 @@
       return !revoked;
     };
   }
-  function sendSubmittedText(stillCurrent, clearAcceptedDraft = true) {
-    return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, matchesUser: matchesSubmittedUser,
+  function sendSubmittedText(stillCurrent, clearAcceptedDraft = true, afterDispatch = null) {
+    return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, afterDispatch, matchesUser: matchesSubmittedUser,
       observeEvidence: check => { pageViewChecks.add(check); return () => pageViewChecks.delete(check); } });
   }
   const GOAL_MARKER_INSTRUCTION = '\n\nFor this Goal session only: at the end of each final reply, write exactly one separate last line: [[COS_GOAL:COMPLETE]] if the entire requested task is finished, or [[COS_GOAL:CONTINUE]] if requested work remains. Do not claim completion for partial work. If user input is required, explain it and omit both markers.';
@@ -9466,6 +9466,10 @@
       if (attempt) attempt.phase = 'failed';
       return ask({ type: 'ack', id: boot.id, status: 'failed', error: why, client: RUN_ID });
     };
+    const commandExpiresAt = Number.isFinite(boot.expiresAt) ? boot.expiresAt : null;
+    if ((boot.type === 'worker' || boot.type === 'revive') && !commandExpiresAt) {
+      return void (await fail('the worker command had no valid app lease; nothing was sent'));
+    }
     // What this command is for, as the app states it. A revival names the conversation and
     // will not be typed anywhere else; the two chat-opening commands name none, and their
     // precondition is the opposite one — that this page still has no conversation at all.
@@ -9496,12 +9500,16 @@
     // A command handed over by the service worker has no marker in this tab's URL to check;
     // the conversation fence above is the stronger half of the same proof and applies to it.
     const stillOnTarget = () => alive && (!fromUrl || markerId() === id) && onTarget();
+    const leaseAlive = () => commandExpiresAt === null || Date.now() < commandExpiresAt;
+    const leaseCurrent = () => stillOnTarget() && leaseAlive();
     const failIfRetargeted = async () => {
-      if (stillOnTarget()) return false;
+      if (leaseCurrent()) return false;
       await fail(
-        target
-          ? 'the chat this message was for changed before it was sent; nothing was sent'
-          : 'the marked fresh chat changed before bootstrap send; nothing was sent'
+        commandExpiresAt !== null && Date.now() >= commandExpiresAt
+          ? 'the app-side worker command lease expired before Send; nothing was sent'
+          : target
+            ? 'the chat this message was for changed before it was sent; nothing was sent'
+            : 'the marked fresh chat changed before bootstrap send; nothing was sent'
       );
       return true;
     };
@@ -9514,12 +9522,21 @@
     if (!readyComposer) return void (await fail('ChatGPT never exposed a usable composer for bootstrap'));
     if (await failIfRetargeted()) return;
 
+    let heldModelProof = false;
+    const releaseModelProof = () => {
+      if (!heldModelProof) return;
+      heldModelProof = false;
+      CLF_DOM.closeModelSettings();
+    };
     if (boot.model || boot.reasoningEffort) {
       const normalizedBootModel = String(boot.model || '').trim().toLowerCase().replace(/\s+/g, '-');
       const proBootstrap = boot.reasoningEffort === 'pro' ||
         /^(?:astra|gpt-?6-astra|gpt-?\d+(?:[.-]\d+)?-pro)$/.test(normalizedBootModel);
       const blockingProviderNotice = () => CLF_DOM.errors().find(error => error.blocking === true) || null;
-      const proAccessDeadline = Date.now() + 8 * 60_000;
+      const proAccessDeadline = Math.min(
+        Date.now() + 8 * 60_000,
+        commandExpiresAt ?? Number.POSITIVE_INFINITY
+      );
       const waitForProAccess = async (notice) => {
         if (!proBootstrap || !notice || Date.now() >= proAccessDeadline) return false;
         // Stay in this exact leased document. A temporary access throttle is neither model
@@ -9528,7 +9545,7 @@
         // soon as ChatGPT removes it, without foreground timers or polling.
         return Boolean(await waitPageView(
           () => (!notice.node?.isConnected || !notice.node.getClientRects?.().length) ? true : null,
-          stillOnTarget,
+          leaseCurrent,
           Math.max(1, proAccessDeadline - Date.now())
         ));
       };
@@ -9538,7 +9555,10 @@
           if (await waitForProAccess(before)) continue;
           return void (await fail(before.text));
         }
-        if (await CLF_DOM.selectModelSettings(boot.model, boot.reasoningEffort, stillOnTarget)) break;
+        if (await CLF_DOM.selectModelSettings(boot.model, boot.reasoningEffort, leaseCurrent, true)) {
+          heldModelProof = true;
+          break;
+        }
         const after = blockingProviderNotice();
         if (after && await waitForProAccess(after)) continue;
         return void (await fail(after?.text || 'The requested model or reasoning is unavailable or could not be confirmed in ChatGPT'));
@@ -9554,9 +9574,20 @@
       if (conversationId === id) emit({ kind: 'model_selection', model: boot.model,
         ...(boot.reasoningEffort ? { reasoningEffort: boot.reasoningEffort } : {}), time: selectionConfirmedAt });
     };
-    if (await failIfRetargeted()) return;
-    if (!CLF_DOM.insertPrompt(boot.text, true)) return void (await fail('ChatGPT refused the inserted text'));
-    const sendingBootstrap = submittedSendLifetime(target);
+    if (await failIfRetargeted()) { releaseModelProof(); return; }
+    if (heldModelProof && !CLF_DOM.modelSettingsMatch(boot.model, boot.reasoningEffort)) {
+      releaseModelProof();
+      return void (await fail('the requested model or reasoning changed after confirmation; nothing was sent'));
+    }
+    if (!CLF_DOM.insertPrompt(boot.text, true)) {
+      releaseModelProof();
+      return void (await fail('ChatGPT refused the inserted text'));
+    }
+    const routeSendLifetime = submittedSendLifetime(target);
+    // Fresh worker/resume sends are allowed to acquire their first conversation route after the
+    // click. The route lifetime owns that transition; the app lease remains an independent hard
+    // wall-clock fence and must not be coupled to the pre-Send "no conversation yet" check.
+    const sendingBootstrap = () => leaseAlive() && routeSendLifetime();
     // Stop/composer-clear may acknowledge acceptance before the authored row mounts.
     // Keep the original draft lease through that receipt, exactly as desktop delivery does;
     // identical text alone must never erase a later trusted edit or a replacement editor.
@@ -9652,12 +9683,16 @@
         return;
       }
     }
-    if (!stillOnTarget() || !exactBootstrapDraft()) { await rejectChangedBootstrap(); return; }
+    if (!leaseCurrent() || !exactBootstrapDraft()) { await rejectChangedBootstrap(); return; }
+    if (heldModelProof && !CLF_DOM.modelSettingsMatch(boot.model, boot.reasoningEffort)) {
+      releaseModelProof();
+      return void (await fail('the requested model or reasoning changed immediately before Send; nothing was sent'));
+    }
     // The destination Resume prompt is the first authored evidence in a brand-new chat.
     // Record it before send() clicks so reportMessages can open B's turn immediately instead
     // of waiting until Fiber eventually exposes the first connector request.
     rememberUserSend();
-    if (!(await sendSubmittedText(sendingBootstrap, false))) {
+    if (!(await sendSubmittedText(sendingBootstrap, false, releaseModelProof))) {
       // Once send() was invoked, a missing/cleared draft cannot prove that no click
       // happened. Only the exact pre-click check above may release the dispatch.
       if (boot.type === 'resume') {
@@ -9718,7 +9753,7 @@
     // Sent, but this tab never saw an id, so nothing can be bound to it. Reported honestly:
     // the app ends the slot or the continuation rather than waiting on a chat it cannot name.
     await ask({ type: 'ack', id: boot.id, status: 'sent', agent, client: RUN_ID });
-    } finally { bootstrapDraft.dispose(); }
+    } finally { releaseModelProof(); bootstrapDraft.dispose(); }
   }
 
   // ----------------------------------------------------------------- start

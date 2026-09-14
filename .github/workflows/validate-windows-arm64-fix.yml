@@ -1,0 +1,45 @@
+name: Validate Windows ARM64 deterministic fix
+
+on:
+  push:
+    branches: [fix/windows-arm64-deterministic-waits]
+    paths:
+      - .github/workflows/validate-windows-arm64-fix.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-11-arm
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          architecture: arm64
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Prove native Windows ARM64 runner
+        run: node -e "if(process.platform!=='win32'||process.arch!=='arm64')throw new Error('Expected win32-arm64, got '+process.platform+'-'+process.arch)"
+      - name: Repeat the repaired lifecycle tests three times
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          1..3 | ForEach-Object {
+            Write-Host "Focused ARM64 lifecycle run $_/3"
+            npx vitest run test/goal-backends.test.ts test/plugins-manager.test.ts
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Full required verification
+        run: npm run verify:ci
+      - name: Package Windows ARM64
+        run: npm run dist:arm64
+      - name: Smoke packaged Windows ARM64 runtime
+        run: node scripts/smoke-packaged-runtime.mjs --platform win32 --arch arm64
+      - name: Require expected installer
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'release/MALACHI-OVERDRIVE-Setup-arm64.exe')) { throw 'Missing Windows ARM64 installer' }

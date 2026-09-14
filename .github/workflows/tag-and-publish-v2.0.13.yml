@@ -1,0 +1,45 @@
+name: Tag and publish v2.0.13 once
+
+on:
+  push:
+    branches: [fix/windows-arm64-deterministic-waits]
+    paths:
+      - .github/workflows/tag-and-publish-v2.0.13.yml
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    env:
+      TARGET: 6dcd54a4dcf5c2744d4016da692f0f37548b8919
+      TAG: v2.0.13
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Verify exact main and absent tag/release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          test "$(git rev-parse origin/main)" = "$TARGET"
+          test -z "$(git ls-remote --tags origin "refs/tags/$TAG")"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists" >&2
+            exit 1
+          fi
+      - name: Create immutable annotated tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" "$TARGET" -m 'MALACHI OVERDRIVE 2.0.13 ARM64 release stability'
+          git push origin "$TAG"
+          test "$(git rev-parse "$TAG^{commit}")" = "$TARGET"
+      - name: Dispatch tagged publish exactly once
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

@@ -24,6 +24,7 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
+          import re
 
           def replace_between(text: str, start: str, end: str, replacement: str, label: str) -> str:
             if text.count(start) != 1:
@@ -34,8 +35,6 @@ jobs:
 
           goal_path = Path('test/goal-backends.test.ts')
           goal = goal_path.read_text()
-          goal_start = 'async function settled(id: string) {'
-          goal_end = "describe('Goal decision backends', () => {"
           new_goal = """async function settled(id: string) {
             const view = () => goal.goalViewFor(id);
             const done = () => {
@@ -56,12 +55,10 @@ jobs:
             return view()!;
           }
           """
-          goal_path.write_text(replace_between(goal, goal_start, goal_end, new_goal, 'goal settled helper'))
+          goal_path.write_text(replace_between(goal, 'async function settled(id: string) {', "describe('Goal decision backends', () => {", new_goal, 'goal settled helper'))
 
           plugin_path = Path('test/plugins-manager.test.ts')
           plugin = plugin_path.read_text()
-          plugin_start = "  it('does not let a slow startup block a ready peer call or shutdown its process', async () => {"
-          plugin_end = "  it('starts with zero installations and does not wait for enabled-server credential discovery on reopen', async () => {"
           new_plugin = """  it('does not let a slow startup block a ready peer call or shutdown its process', async () => {
             const h = await trackedFixture();
             const slowEntry = path.join(dir, 'slow-server.cjs');
@@ -70,7 +67,8 @@ jobs:
             await manager.close();
             let release!: (value: string) => void;
             vi.mocked(getSecret).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
-            manager = new PluginManager(); await manager.initialize(dir);
+            manager = new PluginManager();
+            await manager.initialize(dir);
             const peerReady = () => manager.snapshot().plugins.find(row => row.id === h.row.id)?.status === 'ready';
             try {
               if (!peerReady()) await new Promise<void>((resolve) => {
@@ -95,24 +93,32 @@ jobs:
             } finally { release?.('slow'); }
           });
           """
-          plugin_path.write_text(replace_between(plugin, plugin_start, plugin_end, new_plugin, 'plugin slow-start test'))
+          plugin_path.write_text(replace_between(
+            plugin,
+            "  it('does not let a slow startup block a ready peer call or shutdown its process', async () => {",
+            "  it('starts with zero installations and does not wait for enabled-server credential discovery on reopen', async () => {",
+            new_plugin,
+            'plugin slow-start test',
+          ))
 
           ci_path = Path('.github/workflows/ci.yml')
           ci = ci_path.read_text()
-          anchor = """          - name: Windows x64
-                    runner: windows-2025
-          """
-          if ci.count(anchor) != 1:
-            raise SystemExit(f'CI Windows x64 anchor count was {ci.count(anchor)}, expected 1')
-          ci_path.write_text(ci.replace(anchor, anchor + """          - name: Windows arm64
-                    runner: windows-11-arm
-          """, 1))
+          pattern = r'(?m)^(\s*)- name: Windows x64\n\1  runner: windows-2025\n'
+          match = re.search(pattern, ci)
+          if not match:
+            raise SystemExit('CI Windows x64 matrix entry not found')
+          indent = match.group(1)
+          addition = match.group(0) + f'{indent}- name: Windows arm64\n{indent}  runner: windows-11-arm\n'
+          ci, count = re.subn(pattern, lambda _: addition, ci, count=1)
+          if count != 1:
+            raise SystemExit(f'CI Windows arm64 insertion count was {count}, expected 1')
+          ci_path.write_text(ci)
           PY
 
           git diff --check
           git diff -- test/goal-backends.test.ts test/plugins-manager.test.ts .github/workflows/ci.yml
 
-      - name: Commit isolated fix and remove bootstrap
+      - name: Commit isolated fix and remove bootstraps
         shell: bash
         run: |
           set -euo pipefail
@@ -120,6 +126,6 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add test/goal-backends.test.ts test/plugins-manager.test.ts .github/workflows/ci.yml
           git commit -m 'Make ARM64 lifecycle tests deterministic'
-          git rm .github/workflows/patch-arm64-deterministic-waits.yml
-          git commit -m 'Remove one-time ARM64 patch workflow'
+          git rm -f .github/workflows/patch-arm64-deterministic-waits.yml .github/workflows/patch-arm64-deterministic-waits-v2.yml
+          git commit -m 'Remove one-time ARM64 patch workflows'
           git push origin HEAD:fix/windows-arm64-deterministic-waits

@@ -11,6 +11,14 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.13] — 2026-09-14
+
+- Carries the complete 2.0.12 stability-only runtime forward unchanged while keeping the unpublished `v2.0.12` tag immutable.
+- Replaced the Windows ARM64 release gate's short wall-clock polling assumptions with the existing Goal and PluginManager lifecycle events. The tests still require the same state transitions, ready-peer isolation, real tool call, and process shutdown; they no longer confuse a slow hosted ARM runner with a runtime failure.
+- Preserves the 24/7 safeguards already validated in 2.0.12: fresh account-proven explicit worker admission, exact model/reasoning proof through Send and revival, absolute browser command leases, bounded restart recovery, serialized durable spawn admission, and retention of unread worker results.
+
+See [the full release notes](docs/release-notes/v2.0.13.md).
+
 ## [2.0.12] — 2026-09-14
 
 - Tightened explicit worker-model admission so every new model/reasoning selection is proven against a **fresh account picker observation for that spawn**. A ready catalog restored from an earlier app/account session is presentation continuity only and can no longer authorize a GPT-6 Pro/Astra worker.

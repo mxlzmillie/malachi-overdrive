@@ -126,8 +126,23 @@ async function recording(conversationId: string, text: string): Promise<string> 
   return session.id;
 }
 async function settled(id: string) {
-  await vi.waitFor(() => expect(goal.goalViewFor(id)?.stage).not.toMatch(/^(sending|answering)$/));
-  return goal.goalViewFor(id)!;
+  const view = () => goal.goalViewFor(id);
+  const done = () => {
+    const stage = view()?.stage;
+    return stage !== undefined && stage !== 'sending' && stage !== 'answering';
+  };
+  if (!done()) await new Promise<void>((resolve) => {
+    const unsubscribe = goal.onGoalChange(() => {
+      if (!done()) return;
+      unsubscribe();
+      resolve();
+    });
+    if (done()) {
+      unsubscribe();
+      resolve();
+    }
+  });
+  return view()!;
 }
 describe('Goal decision backends', () => {
   it('restarts only the deliberately authorized failed source helper', async () => {

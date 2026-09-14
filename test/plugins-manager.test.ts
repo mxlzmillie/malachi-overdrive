@@ -502,19 +502,33 @@ describe('enabled plugin process ownership', () => {
     const h = await trackedFixture();
     const slowEntry = path.join(dir, 'slow-server.cjs');
     await fs.writeFile(slowEntry, fixture.replaceAll('Echo.Mixed', 'Slow.Echo'));
-    await manager.install({ source: { kind: 'command', command: process.execPath, args: [slowEntry] }, credentials: { TEST_SECRET: 'slow' } });
+    const slow = (await manager.install({ source: { kind: 'command', command: process.execPath, args: [slowEntry] }, credentials: { TEST_SECRET: 'slow' } })).plugins.find(row => row.id !== h.row.id)!;
     await manager.close();
     let release!: (value: string) => void;
     vi.mocked(getSecret).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
-    manager = new PluginManager(); await manager.initialize(dir);
+    manager = new PluginManager();
+    await manager.initialize(dir);
+    const peerReady = () => manager.snapshot().plugins.find(row => row.id === h.row.id)?.status === 'ready';
     try {
-      await vi.waitFor(() => expect(manager.snapshot().plugins.find(row => row.id === h.row.id)!.status).toBe('ready'));
-      const result = await Promise.race([manager.call('Echo.Mixed', { value: 'ready peer' }), new Promise(resolve => setTimeout(() => resolve('blocked'), 200))]);
-      expect(result).not.toBe('blocked');
+      if (!peerReady()) await new Promise<void>((resolve) => {
+        const unsubscribe = manager.onChanged(() => {
+          if (!peerReady()) return;
+          unsubscribe();
+          resolve();
+        });
+        if (peerReady()) {
+          unsubscribe();
+          resolve();
+        }
+      });
+      expect(manager.snapshot().plugins.find(row => row.id === slow.id)!.status).toBe('connecting');
+      const result = await manager.call('Echo.Mixed', { value: 'ready peer' });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toEqual({ value: 'ready peer' });
+      expect(manager.snapshot().plugins.find(row => row.id === slow.id)!.status).toBe('connecting');
       const active = (await h.pids()).at(-1)!;
-      const closing = manager.close();
-      await vi.waitFor(() => expect(alive(active.pid)).toBe(false), { timeout: 1000 });
-      await closing;
+      await manager.close();
+      expect(alive(active.pid)).toBe(false);
     } finally { release?.('slow'); }
   });
   it('starts with zero installations and does not wait for enabled-server credential discovery on reopen', async () => {

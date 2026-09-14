@@ -25,13 +25,17 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
+          def replace_between(text: str, start: str, end: str, replacement: str, label: str) -> str:
+            if text.count(start) != 1:
+              raise SystemExit(f'{label} start marker count was {text.count(start)}, expected 1')
+            begin = text.index(start)
+            finish = text.index(end, begin)
+            return text[:begin] + replacement + text[finish:]
+
           goal_path = Path('test/goal-backends.test.ts')
           goal = goal_path.read_text()
-          old_goal = """async function settled(id: string) {
-            await vi.waitFor(() => expect(goal.goalViewFor(id)?.stage).not.toMatch(/^(sending|answering)$/));
-            return goal.goalViewFor(id)!;
-          }
-          """
+          goal_start = 'async function settled(id: string) {'
+          goal_end = "describe('Goal decision backends', () => {"
           new_goal = """async function settled(id: string) {
             const view = () => goal.goalViewFor(id);
             const done = () => {
@@ -52,32 +56,12 @@ jobs:
             return view()!;
           }
           """
-          if goal.count(old_goal) != 1:
-            raise SystemExit('goal settled helper did not match exactly once')
-          goal_path.write_text(goal.replace(old_goal, new_goal))
+          goal_path.write_text(replace_between(goal, goal_start, goal_end, new_goal, 'goal settled helper'))
 
           plugin_path = Path('test/plugins-manager.test.ts')
           plugin = plugin_path.read_text()
-          old_plugin = """  it('does not let a slow startup block a ready peer call or shutdown its process', async () => {
-            const h = await trackedFixture();
-            const slowEntry = path.join(dir, 'slow-server.cjs');
-            await fs.writeFile(slowEntry, fixture.replaceAll('Echo.Mixed', 'Slow.Echo'));
-            await manager.install({ source: { kind: 'command', command: process.execPath, args: [slowEntry] }, credentials: { TEST_SECRET: 'slow' } });
-            await manager.close();
-            let release!: (value: string) => void;
-            vi.mocked(getSecret).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
-            manager = new PluginManager(); await manager.initialize(dir);
-            try {
-              await vi.waitFor(() => expect(manager.snapshot().plugins.find(row => row.id === h.row.id)!.status).toBe('ready'));
-              const result = await Promise.race([manager.call('Echo.Mixed', { value: 'ready peer' }), new Promise(resolve => setTimeout(() => resolve('blocked'), 200))]);
-              expect(result).not.toBe('blocked');
-              const active = (await h.pids()).at(-1)!;
-              const closing = manager.close();
-              await vi.waitFor(() => expect(alive(active.pid)).toBe(false), { timeout: 1000 });
-              await closing;
-            } finally { release?.('slow'); }
-          });
-          """
+          plugin_start = "  it('does not let a slow startup block a ready peer call or shutdown its process', async () => {"
+          plugin_end = "  it('starts with zero installations and does not wait for enabled-server credential discovery on reopen', async () => {"
           new_plugin = """  it('does not let a slow startup block a ready peer call or shutdown its process', async () => {
             const h = await trackedFixture();
             const slowEntry = path.join(dir, 'slow-server.cjs');
@@ -111,25 +95,18 @@ jobs:
             } finally { release?.('slow'); }
           });
           """
-          if plugin.count(old_plugin) != 1:
-            raise SystemExit('plugin slow-start test did not match exactly once')
-          plugin_path.write_text(plugin.replace(old_plugin, new_plugin))
+          plugin_path.write_text(replace_between(plugin, plugin_start, plugin_end, new_plugin, 'plugin slow-start test'))
 
           ci_path = Path('.github/workflows/ci.yml')
           ci = ci_path.read_text()
-          old_ci = """          - name: Windows x64
+          anchor = """          - name: Windows x64
                     runner: windows-2025
-                  - name: macOS arm64
           """
-          new_ci = """          - name: Windows x64
-                    runner: windows-2025
-                  - name: Windows arm64
+          if ci.count(anchor) != 1:
+            raise SystemExit(f'CI Windows x64 anchor count was {ci.count(anchor)}, expected 1')
+          ci_path.write_text(ci.replace(anchor, anchor + """          - name: Windows arm64
                     runner: windows-11-arm
-                  - name: macOS arm64
-          """
-          if ci.count(old_ci) != 1:
-            raise SystemExit('CI Windows matrix did not match exactly once')
-          ci_path.write_text(ci.replace(old_ci, new_ci))
+          """, 1))
           PY
 
           git diff --check

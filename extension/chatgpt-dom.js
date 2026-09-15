@@ -1887,7 +1887,13 @@ var CLF_DOM = (() => {
     return {
       state,
       async open() {
-        if (!picker()) { const button = await wait(trigger, 15000); if (!key(button, 'Enter') || !await wait(picker)) return null; }
+        if (!picker()) {
+          const button = await wait(trigger, 15000);
+          if (!key(button, 'Enter')) return null;
+        }
+        // Start the Fiber-state observation immediately after opening. A separate picker-node
+        // wait can observe the portal before React has committed readable picker props, then
+        // disconnect before that state becomes visible with no later DOM mutation to wake it.
         return state();
       },
       close() {
@@ -1911,7 +1917,10 @@ var CLF_DOM = (() => {
           toggle[0].click();
         }
         const option = await wait(() => {
-          const rows = versionRows().filter(node => node.textContent.trim() === label && node.getAttribute('aria-disabled') !== 'true');
+          // Native rows may carry a secondary deprecation/status line. Match the primary
+          // model label only; the full row text is not the model identity.
+          const rowLabel = node => (node.querySelector('.truncate')?.textContent || node.textContent || '').trim();
+          const rows = versionRows().filter(node => rowLabel(node) === label && node.getAttribute('aria-disabled') !== 'true');
           return rows.length === 1 ? rows[0] : null;
         });
         if (!key(option, 'Enter')) return null;

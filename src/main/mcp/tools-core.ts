@@ -111,6 +111,7 @@ import { ensureDevToolchain } from '../toolchain.js';
 import {
   agentForCaller,
   currentRunId,
+  deferAgentFinishForAttribution,
   noteAgentContextTokens,
   persistCriticalSwarmNow,
   PRIME_ID,
@@ -136,6 +137,7 @@ import {
 } from './call-context.js';
 import {
   awaitFreshCallOrigin,
+  evidenceWindow,
   recordAgentMessage
 } from '../session/recorder.js';
 import { findSessionByConversation } from '../session/store.js';
@@ -1153,6 +1155,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
  * can wake a worker, is what makes the ceiling survive a crash rather than a restart quietly
  * handing back a worker the prime was already told was finished.
  */
+const FINISH_INLINE_EVIDENCE_MS = evidenceWindow(500);
+
 let spawnAdmissionTail: Promise<void> = Promise.resolve();
 
 /**
@@ -1473,7 +1477,36 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
               'agents action=finish requires result: the report the prime reads in your place — what you changed, what you verified and what is left. Send it as result and call finish again.'
             );
           }
-          const staged = stageFinishAgent(await callerNow(startedAt), input.result);
+          const ingressCaller = currentCaller();
+          // Normal browser pages usually publish this exact request id in the same tick as the
+          // call. Preserve the synchronous finish/inbox result for that case, but do not wait on
+          // the long generic identity window: GPT-6 Pro can publish metadata.request_id only
+          // after it receives the connector result, so a long wait is circular. One short,
+          // request-specific window catches ordinary in-flight evidence; anything later becomes
+          // a durable pending finish resolved after the result returns.
+          const caller = ingressCaller.conversationId
+            ? ingressCaller
+            : ingressCaller.requestId
+              ? await callerNow(startedAt, { windowMs: FINISH_INLINE_EVIDENCE_MS })
+              : await callerNow(startedAt);
+          if (!caller.conversationId && ingressCaller.requestId) {
+            const pending = await deferAgentFinishForAttribution(ingressCaller.requestId, input.result, startedAt);
+            return {
+              content: [{
+                type: 'text' as const,
+                text:
+                  `FINISH_PENDING_IDENTITY: your result is durably held under this exact ChatGPT request id${pending.repeat ? ' already' : ''}. ` +
+                  'Do not retry or do more work. MALACHI OVERDRIVE will publish it to the prime only if the browser later proves this request belongs to your worker conversation.'
+              }],
+              structuredContent: { action: 'finish', state: 'pending-identity', repeat: pending.repeat }
+            };
+          }
+          if (!caller.conversationId) {
+            return fail(
+              'WORKER_IDENTITY_LOST: this finish call carried no exact ChatGPT request id and the browser could not prove its conversation. No report was accepted; retry once after the browser companion reconnects.'
+            );
+          }
+          const staged = stageFinishAgent(caller, input.result);
           let accepted = staged.repeat;
           try {
             if (!staged.repeat) {
@@ -1637,12 +1670,12 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
  * The proven identity is then adopted for the rest of the call, so this result is recorded
  * against the right agent and carries the right inbox.
  */
-async function callerNow(startedAt: number, options: { exact?: boolean } = {}): Promise<Caller> {
+async function callerNow(startedAt: number, options: { exact?: boolean; windowMs?: number } = {}): Promise<Caller> {
   const base = currentCaller();
   // `exact` marks the one action that binds a run: spawn. It is the call whose refusal the
   // model cannot absorb, so it gets the longer ceiling; every other `agents` action can be
   // declined and asked again on the next tool call.
-  const window = base.requestId ? (options.exact ? SPAWN_EVIDENCE_MS : IDENTITY_EVIDENCE_MS) : PRIME_EVIDENCE_MS;
+  const window = options.windowMs ?? (base.requestId ? (options.exact ? SPAWN_EVIDENCE_MS : IDENTITY_EVIDENCE_MS) : PRIME_EVIDENCE_MS);
   const resolved =
     base.conversationId ??
     (await awaitFreshCallOrigin('agents', startedAt, window, {

@@ -384,6 +384,30 @@ interface FinishStageState {
 }
 const activeFinishStages = new Map<Agent, FinishStageState>();
 
+/**
+ * Explicit worker finishes whose exact HTTP request id has not been matched to a ChatGPT
+ * conversation yet. The result is durable, but deliberately has no agent/prime owner until
+ * the request-correlation registry proves one. This is the post-response half of GPT-6 Pro
+ * finish delivery: its page can publish metadata.request_id only after the connector result
+ * returns, so a synchronous identity timeout cannot be the authority boundary.
+ */
+export interface PendingAgentFinish {
+  requestId: string;
+  result: string;
+  createdAt: number;
+  /**
+   * Delivery facts frozen before caller identity is known. Each candidate is scoped to its
+   * conversation; exact request correlation later selects at most one row. Keeping these ids
+   * with the anonymous intent preserves finish-as-ACK across an app restart without guessing
+   * which worker made the call.
+   */
+  acknowledgements: Array<{ conversationId: string; messageIds: string[] }>;
+}
+const PENDING_FINISH_TTL_MS = 10 * 60_000;
+const pendingAgentFinishes = new Map<string, PendingAgentFinish>();
+/** Pending intents visible only to the immediate critical snapshot until its write succeeds. */
+const unpublishedPendingAgentFinishes = new Set<string>();
+
 // ------------------------------------------------------------------ listeners
 
 export function onSwarmChange(listener: () => void): () => void {
@@ -447,6 +471,89 @@ export async function persistCriticalSwarmNow(): Promise<boolean> {
     });
   }
   return criticalPersistFlight;
+}
+
+function prunePendingAgentFinishes(now = Date.now(), notify = true): boolean {
+  let changedAny = false;
+  for (const [requestId, pending] of pendingAgentFinishes) {
+    if (now - pending.createdAt <= PENDING_FINISH_TTL_MS) continue;
+    pendingAgentFinishes.delete(requestId);
+    unpublishedPendingAgentFinishes.delete(requestId);
+    changedAny = true;
+    logWarn(`multi-agent: expired unresolved finish request ${requestId.slice(0, 20)}… without exact conversation proof`);
+  }
+  if (changedAny && notify) changed();
+  return changedAny;
+}
+
+/** Durable exact-request finish intents waiting for browser request-id ownership proof. */
+export function pendingAgentFinishRequests(): PendingAgentFinish[] {
+  prunePendingAgentFinishes();
+  return [...pendingAgentFinishes.values()]
+    .filter((pending) => !unpublishedPendingAgentFinishes.has(pending.requestId))
+    .map((pending) => ({ ...pending }));
+}
+
+function pendingFinishAcknowledgements(callStartedAt: number): PendingAgentFinish['acknowledgements'] {
+  const candidates: PendingAgentFinish['acknowledgements'] = [];
+  const families = [
+    ...[...runs.values()].map((run) => run.agents),
+    ...[...dormantRuns.values()].map((history) => history.agents)
+  ];
+  for (const agents of families) {
+    for (const agent of agents.values()) {
+      if (agent.info.role !== 'worker' || !agent.info.conversationId) continue;
+      const messageIds = agent.queue
+        .filter((message) =>
+          message.ackedAt === null &&
+          message.offeredAt !== null &&
+          message.offeredAt < callStartedAt &&
+          !message.offeredOnFinish
+        )
+        .map((message) => message.id);
+      if (messageIds.length > 0) candidates.push({ conversationId: agent.info.conversationId, messageIds });
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Makes an unresolved explicit finish durable without assigning it to any worker yet.
+ * The first result for one exact HTTP request wins; a retry under another request id is a
+ * separate intent and later exact correlation/idempotent worker state collapses it safely.
+ */
+export async function deferAgentFinishForAttribution(
+  requestId: string,
+  result: string,
+  createdAt = Date.now()
+): Promise<{ repeat: boolean }> {
+  requireEnabled();
+  prunePendingAgentFinishes(createdAt);
+  if (!requestId || requestId.length > 200) throw new AgentError('Worker finish request identity is missing or invalid.');
+  const held = pendingAgentFinishes.get(requestId);
+  if (held) return { repeat: true };
+  const pending: PendingAgentFinish = {
+    requestId,
+    result: result.slice(0, MAX_MESSAGE_CHARS),
+    createdAt,
+    acknowledgements: pendingFinishAcknowledgements(createdAt)
+  };
+  pendingAgentFinishes.set(requestId, pending);
+  unpublishedPendingAgentFinishes.add(requestId);
+  changed();
+  try {
+    if (!(await persistCriticalSwarmNow())) throw new Error('the broker has no immediate durable persistence sink');
+    unpublishedPendingAgentFinishes.delete(requestId);
+    changed('telemetry');
+    return { repeat: false };
+  } catch (error) {
+    pendingAgentFinishes.delete(requestId);
+    unpublishedPendingAgentFinishes.delete(requestId);
+    changed();
+    throw new AgentError(
+      `The unresolved worker finish could not cross its durable acceptance barrier. Retry the same finish once. (${error instanceof Error ? error.message : String(error)})`
+    );
+  }
 }
 
 export function onRetiredWorkersPersist(handler: (() => void) | null): void {
@@ -1964,7 +2071,11 @@ function finishTarget(caller: Caller): Agent {
   throw new AgentError(`${dormant.info.id} is dormant but has not finished, so finish cannot be retried from this state.`);
 }
 
-function planFinish(agent: Agent, result: string): { info: AgentInfo; report: AgentMessage } {
+function planFinish(
+  agent: Agent,
+  result: string,
+  acknowledgedMessageIds: readonly string[] = []
+): { info: AgentInfo; report: AgentMessage } {
   const run = runForAgent(agent);
   // What the prime told this worker and cannot be shown to have reached it. Taken before
   // terminalisation and said out loud, because this app cannot prove a tool result arrived —
@@ -1975,10 +2086,13 @@ function planFinish(agent: Agent, result: string): { info: AgentInfo; report: Ag
   // about the very messages this call confirms. A row never offered is still uncertain, and a
   // row offered on an earlier finish result is deliberately still uncertain because this may be
   // the retry of that lost finish result (see acknowledgeOffers(byFinish=true)).
+  const acknowledged = new Set(acknowledgedMessageIds);
   const unconfirmed = agent.queue
     .filter(
       (message) =>
-        message.ackedAt === null && (message.offeredAt === null || message.offeredOnFinish)
+        message.ackedAt === null &&
+        !acknowledged.has(message.id) &&
+        (message.offeredAt === null || message.offeredOnFinish)
     )
     .map((message) => message.id);
   // A finish is evidence that this piece of work is over, and nothing more than that. The
@@ -2063,7 +2177,7 @@ function upgradeStagedFinishAtCeiling(agent: Agent): boolean {
   ) {
     return false;
   }
-  const terminal = planFinish(agent, stage.info.result ?? '');
+  const terminal = planFinish(agent, stage.info.result ?? '', stage.acknowledgedMessageIds);
   stage.info.state = 'finished';
   stage.info.finishedAt = stage.info.sleptAt ?? terminal.info.finishedAt ?? Date.now();
   stage.info.revivable = false;
@@ -2119,7 +2233,7 @@ function stageFinish(agent: Agent, result: string, acknowledgedMessageIds: reado
     );
   }
   if (!run) throw new AgentError('No sub-agent run is active.');
-  const planned = planFinish(agent, result);
+  const planned = planFinish(agent, result, acknowledgedMessageIds);
   const stage: FinishStageState = {
     run,
     agent,
@@ -2177,8 +2291,58 @@ function stageFinish(agent: Agent, result: string, acknowledgedMessageIds: reado
 }
 
 /** Plans an explicit worker finish behind its durable acceptance barrier. */
-export function stageFinishAgent(caller: Caller, result: string): StagedFinish {
-  return stageFinish(finishTarget(caller), result);
+export function stageFinishAgent(
+  caller: Caller,
+  result: string,
+  acknowledgedMessageIds: readonly string[] = []
+): StagedFinish {
+  return stageFinish(finishTarget(caller), result, acknowledgedMessageIds);
+}
+
+/**
+ * Commits one durably-held finish only after the correlation registry proves the exact request
+ * belongs to this conversation. The critical snapshot atomically removes the pending intent and
+ * overlays the worker's sleeping/result + prime report, so a crash can expose neither half alone.
+ */
+export async function resolvePendingAgentFinish(
+  requestId: string,
+  conversationId: string
+): Promise<FinishResult | null> {
+  prunePendingAgentFinishes();
+  const pending = pendingAgentFinishes.get(requestId);
+  if (!pending || unpublishedPendingAgentFinishes.has(requestId)) return null;
+
+  let staged: StagedFinish;
+  try {
+    const acknowledgedMessageIds = pending.acknowledgements
+      .find((candidate) => candidate.conversationId === conversationId)?.messageIds ?? [];
+    staged = stageFinishAgent({ conversationId }, pending.result, acknowledgedMessageIds);
+  } catch (error) {
+    // Exact ownership was proved, but that conversation is no longer an eligible worker. Keep
+    // no anonymous intent around that could be applied to a later run after ids are reused.
+    pendingAgentFinishes.delete(requestId);
+    changed();
+    try { await persistCriticalSwarmNow(); } catch { /* newer safe snapshot remains queued */ }
+    logWarn(
+      `multi-agent: discarded finish request ${requestId.slice(0, 20)}… after exact attribution to ineligible conversation ${conversationId}: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return null;
+  }
+
+  pendingAgentFinishes.delete(requestId);
+  changed();
+  try {
+    if (!(await persistCriticalSwarmNow())) throw new Error('the broker has no immediate durable persistence sink');
+    staged.commit();
+    return { info: { ...staged.info }, report: staged.report ? { ...staged.report } : null, repeat: staged.repeat };
+  } catch (error) {
+    staged.rollback();
+    pendingAgentFinishes.set(requestId, pending);
+    changed();
+    throw new AgentError(
+      `The attributed worker finish could not cross its durable acceptance barrier; its exact request remains pending. (${error instanceof Error ? error.message : String(error)})`
+    );
+  }
 }
 
 /**
@@ -3807,10 +3971,13 @@ interface DormantRunSnapshot {
   agents: SerializedAgent[];
 }
 
+interface PendingAgentFinishSnapshot extends PendingAgentFinish {}
+
 export interface SwarmSnapshot {
   /**
-   * 6 = independent activeRuns plus dormant prime-owned histories. Top-level fields are a
-   * derived sole-owner compatibility projection; v6 restoration reads activeRuns only.
+   * 6 = independent activeRuns plus dormant prime-owned histories. `pendingFinishes` is an
+   * optional backward-compatible v6 extension: older builds ignore it but still preserve the
+   * run itself on downgrade. Top-level fields remain a derived sole-owner compatibility projection.
    * Versions 4/5 migrate their single active incarnation; versions
    * before 4 are discarded because their worker identity depended on routing codes this build
    * cannot honour.
@@ -3824,6 +3991,7 @@ export interface SwarmSnapshot {
   startedAt: number | null;
   agents: SerializedAgent[];
   dormantRuns?: DormantRunSnapshot[];
+  pendingFinishes?: PendingAgentFinishSnapshot[];
 }
 
 export function snapshotSwarm(): SwarmSnapshot | null {
@@ -3844,9 +4012,13 @@ function snapshotSwarmIncludingUnpublished(): SwarmSnapshot | null {
 }
 
 function buildSwarmSnapshot(includeUnpublished: boolean): SwarmSnapshot | null {
+  prunePendingAgentFinishes(Date.now(), false);
   const active = [...runs.values()].filter(r => includeUnpublished || !unpublishedRuns.has(r));
   const dormant = [...dormantRuns.values()];
-  if (active.length === 0 && dormant.length === 0) return null;
+  const pendingFinishes = [...pendingAgentFinishes.values()]
+    .filter((pending) => includeUnpublished || !unpublishedPendingAgentFinishes.has(pending.requestId))
+    .map((pending) => ({ ...pending }));
+  if (active.length === 0 && dormant.length === 0 && pendingFinishes.length === 0) return null;
   // Legacy top-level projection is deliberately empty with multiple owners. Version 6 readers
   // use activeRuns exclusively; retaining a sole-owner projection keeps older diagnostic readers useful.
   const sole = active.length === 1 ? active[0] : null;
@@ -3856,7 +4028,8 @@ function buildSwarmSnapshot(includeUnpublished: boolean): SwarmSnapshot | null {
     activeRuns: active.map(r => ({ runId: r.runId, primeConversationId: r.primeConversationId,
       startedAt: r.startedAt, agents: serializeAgents(r.agents, includeUnpublished) })),
     dormantRuns: dormant.map(h => ({ primeConversationId: h.primeConversationId, startedAt: h.startedAt,
-      parkedAt: h.parkedAt, agents: serializeAgents(h.agents, includeUnpublished) })) };
+      parkedAt: h.parkedAt, agents: serializeAgents(h.agents, includeUnpublished) })),
+    pendingFinishes };
 }
 
 function serializeAgents(agents: Map<string, Agent>, includeUnpublished: boolean): SerializedAgent[] {
@@ -3924,6 +4097,8 @@ export function restoreSwarm(snapshot: SwarmSnapshot | null): void {
   unpublishedRuns.clear();
   activeSpawnStages.clear();
   activeFinishStages.clear();
+  pendingAgentFinishes.clear();
+  unpublishedPendingAgentFinishes.clear();
   criticalMutationRevision = 0;
   persistedCriticalRevision = 0;
   criticalPersistFlight = null;
@@ -3981,7 +4156,7 @@ export function restoreSwarm(snapshot: SwarmSnapshot | null): void {
     if (pruneDormantRuns()) repaired = true;
   }
 
-  const savedRuns = snapshot.version === 6 ? (Array.isArray(snapshot.activeRuns) ? snapshot.activeRuns : []) : [snapshot];
+  const savedRuns = snapshot.version >= 6 ? (Array.isArray(snapshot.activeRuns) ? snapshot.activeRuns : []) : [snapshot];
   for (const saved of savedRuns) {
     if (!saved) { repaired = true; continue; }
     const hasActive =
@@ -4037,6 +4212,30 @@ export function restoreSwarm(snapshot: SwarmSnapshot | null): void {
       }
     }
 
+  }
+
+  if (snapshot.version === 6 && Array.isArray(snapshot.pendingFinishes)) {
+    const now = Date.now();
+    for (const raw of snapshot.pendingFinishes) {
+      if (!raw || typeof raw.requestId !== 'string' || !raw.requestId || raw.requestId.length > 200 ||
+          typeof raw.result !== 'string' || !raw.result || raw.result.length > MAX_MESSAGE_CHARS ||
+          !Number.isFinite(raw.createdAt) || now - raw.createdAt > PENDING_FINISH_TTL_MS) {
+        repaired = true;
+        continue;
+      }
+      const acknowledgements = Array.isArray(raw.acknowledgements)
+        ? raw.acknowledgements
+            .filter((entry) =>
+              entry && typeof entry.conversationId === 'string' && entry.conversationId.length > 0 &&
+              entry.conversationId.length <= 200 && Array.isArray(entry.messageIds)
+            )
+            .map((entry) => ({
+              conversationId: entry.conversationId,
+              messageIds: entry.messageIds.filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200).slice(0, 64)
+            }))
+        : [];
+      if (!pendingAgentFinishes.has(raw.requestId)) pendingAgentFinishes.set(raw.requestId, { ...raw, acknowledgements });
+    }
   }
 
   // This process has been watching for exactly no time. Every `lastSeenAt` that came back
@@ -4139,6 +4338,8 @@ export function resetAgentsForTests(): void {
   unpublishedRuns.clear();
   activeSpawnStages.clear();
   activeFinishStages.clear();
+  pendingAgentFinishes.clear();
+  unpublishedPendingAgentFinishes.clear();
   retiredWorkers.clear();
   livenessFloor = 0;
   spawnRequest = null;

@@ -121,11 +121,14 @@ const {
   cancelPrimeTransfer,
   finishAgent,
   currentRunId,
+  deferAgentFinishForAttribution,
   DETACHED_SILENCE_MS,
   noteAgentAlive,
   noteAgentContextTokens,
   noteWorkerRevived,
   offerMessages,
+  offerMessagesForConversation,
+  pendingAgentFinishRequests,
   pendingWorkerRevivals,
   repairPrimeConversationAfterRecovery,
   requestWorkerBootstraps,
@@ -837,6 +840,42 @@ describe('activity feed', () => {
     expect(reply.body.pendingTools).toBe(0);
     expect(reply.body.settlingTools).toBe(0);
     expect(liveConversations().some((entry) => entry.conversationId === conversationId)).toBe(true);
+  });
+
+  it('publishes a durably pending worker finish when the late correlation route proves that exact worker', async () => {
+    await pair();
+    onSwarmPersistNow(async () => undefined);
+    const workerConversation = '12121212-3434-5656-7878-909090909090';
+    const requestId = 'wfr_bridge_late_worker_finish';
+    spawn({ workers: [{ task: 'finish after late request proof' }], caller: { conversationId: PRIME_CHAT } });
+    expect(bindConversation('worker-1', workerConversation)).toBe(true);
+
+    await deferAgentFinishForAttribution(requestId, 'ASTRA_BRIDGE_OK', Date.now());
+    expect(pendingAgentFinishRequests().map((entry) => entry.requestId)).toContain(requestId);
+    expect(swarmStateForCaller({ conversationId: PRIME_CHAT }).agents.find((agent) => agent.id === 'worker-1')?.state).toBe('active');
+
+    const mapped = await request('POST', '/correlations', {
+      body: {
+        conversationId: workerConversation,
+        calls: [{
+          messageId: 'late-worker-finish-call',
+          tool: 'agents',
+          order: 0,
+          answered: true,
+          requestId,
+          createTime: Date.now() / 1000
+        }]
+      }
+    });
+
+    expect(mapped.status).toBe(200);
+    expect(mapped.body.confirmed).toEqual([requestId]);
+    expect(pendingAgentFinishRequests()).toEqual([]);
+    expect(swarmStateForCaller({ conversationId: PRIME_CHAT }).agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'sleeping',
+      result: 'ASTRA_BRIDGE_OK'
+    });
+    expect(offerMessagesForConversation(PRIME_CHAT)?.messages.some((message) => message.text.includes('ASTRA_BRIDGE_OK'))).toBe(true);
   });
 
   it('atomically registers and verifies a live request id against its chat before the MCP call is filed', async () => {

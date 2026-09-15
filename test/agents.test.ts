@@ -34,6 +34,7 @@ const {
   clearAgent,
   claimWorkerRevival,
   currentRunId,
+  deferAgentFinishForAttribution,
   dormantWorkerNotice,
   reactivateDormantRunForConversation,
   failAgent,
@@ -46,6 +47,7 @@ const {
   onSwarmEnd,
   onSwarmPersist,
   onSwarmPersistNow,
+  pendingAgentFinishRequests,
   pendingCount,
   pendingWorkerSpawns,
   pauseSwarmForDisable,
@@ -67,6 +69,7 @@ const {
   freeWorkerSlots,
   releaseQuiescentRun,
   repairPrimeConversationAfterRecovery,
+  resolvePendingAgentFinish,
   retiredWorkerForConversation,
   restoreRetiredWorkers,
   rollbackWorkerRevivalClaim,
@@ -97,6 +100,7 @@ const { findSessionByConversation, initSessionStore, readRecentEvents, resetSess
   '../src/main/session/store.js'
 );
 const { recordChatObservations, resetRecorderForTests } = await import('../src/main/session/recorder.js');
+const { requestCorrelation } = await import('../src/main/session/correlation.js');
 const { resetWorkspaces, setWorkspaceFor, workspaceForChat } = await import('../src/main/workspace.js');
 const { DEFAULT_CAPABILITIES } = await import('../src/shared/types.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
@@ -2148,6 +2152,39 @@ describe('restart', () => {
     ]);
   });
 
+  it('keeps an unresolved finish durable in the v6 snapshot and acknowledges prior inbox delivery when exact ownership arrives', async () => {
+    startSwarm(1);
+    startWorker('worker-1');
+    sendMessage(prime, 'worker-1', 'check the parser before finishing');
+    const offered = offerMessages('worker-1')[0]!;
+    const callStartedAt = (offered.offeredAt ?? Date.now()) + 1;
+
+    expect(await deferAgentFinishForAttribution('wfr_late_finish_restart', 'ASTRA_ONE_OK', callStartedAt)).toEqual({ repeat: false });
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.state).toBe('active');
+    expect(pendingAgentFinishRequests()).toEqual([
+      expect.objectContaining({ requestId: 'wfr_late_finish_restart', result: 'ASTRA_ONE_OK', createdAt: callStartedAt })
+    ]);
+
+    const saved = snapshotSwarm()!;
+    expect(saved.version).toBe(6);
+    expect(saved.pendingFinishes).toEqual([
+      expect.objectContaining({ requestId: 'wfr_late_finish_restart', result: 'ASTRA_ONE_OK' })
+    ]);
+
+    resetAgentsForTests();
+    onSwarmPersistNow(async () => undefined);
+    restoreSwarm(saved);
+    expect(pendingAgentFinishRequests()).toHaveLength(1);
+
+    const settled = await resolvePendingAgentFinish('wfr_late_finish_restart', 'c-worker-1');
+    expect(settled?.info).toMatchObject({ id: 'worker-1', state: 'sleeping', result: 'ASTRA_ONE_OK' });
+    expect(pendingAgentFinishRequests()).toEqual([]);
+    expect(pendingCount('worker-1')).toBe(0);
+    const report = offerMessages(PRIME_ID).find((message) => message.text.includes('[worker-1 reported]'));
+    expect(report?.text).toContain('ASTRA_ONE_OK');
+    expect(report?.text).not.toContain('ended without ever confirming');
+  });
+
   it('replays a queued worker spawn when the bridge registers after the restore', () => {
     startSwarm(2);
     const snapshot = snapshotSwarm()!;
@@ -2518,6 +2555,38 @@ describe('through the MCP endpoint', () => {
       dispose();
       await setEnabled(true);
     }
+  });
+
+  it('defers a worker finish when exact request identity becomes visible only after the result, then commits it to that proven worker', async () => {
+    startSwarm(1);
+    bindConversation('worker-1', 'c-worker-1');
+    const requestId = 'wfr_finish_visible_after_result';
+
+    const started = Date.now();
+    const text = await agentsWithRequestId(requestId, 'finish', { result: 'ASTRA_ONE_OK' });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(text).toContain('FINISH_PENDING_IDENTITY');
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.state).toBe('active');
+    expect(requestCorrelation(requestId)).toBeNull();
+    expect(pendingAgentFinishRequests().map((entry) => entry.requestId)).toContain(requestId);
+
+    const observedAt = Date.now();
+    await recordChatObservations('c-worker-1', [
+      { kind: 'turn_start', time: observedAt, turnId: 'late-finish-turn' },
+      {
+        kind: 'tool_evidence',
+        time: observedAt,
+        turnId: 'late-finish-turn',
+        calls: [{ messageId: 'late-finish-message', tool: 'agents', order: 0, answered: true, requestId }]
+      }
+    ]);
+    const exact = requestCorrelation(requestId);
+    expect(exact?.conversationId).toBe('c-worker-1');
+
+    const settled = await resolvePendingAgentFinish(requestId, exact!.conversationId);
+    expect(settled?.info).toMatchObject({ id: 'worker-1', state: 'sleeping', result: 'ASTRA_ONE_OK' });
+    expect(pendingAgentFinishRequests()).toEqual([]);
+    expect(offerMessagesForConversation(PRIME_CHAT)?.messages.some((message) => message.text.includes('ASTRA_ONE_OK'))).toBe(true);
   });
 
   it('is identified by exact request-id evidence that arrived before the call it names', async () => {

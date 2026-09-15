@@ -50,7 +50,7 @@ it('switches the observed Work surface to Chat once without relying on translate
   expect(await api.prepareChatModelSurface()).toBe(true); expect(click).toHaveBeenCalledTimes(1);
   expect(await api.prepareChatModelSurface()).toBe(true); expect(click).toHaveBeenCalledTimes(1);
 });
-function fixture(options: { extraVersions?: number; versionTransitionMs?: number; fakeTimers?: boolean } = {}) {
+function fixture(options: { extraVersions?: number; versionTransitionMs?: number; fakeTimers?: boolean; versionSubtitle?: string } = {}) {
   page = new JSDOM('<form><div id="prompt-textarea" contenteditable="true"></div><div data-testid="composer-trailing-actions"><button type="button" aria-haspopup="menu">Denkaufwand</button><button data-testid="send-button">Senden</button></div></form>', { url: 'https://chatgpt.com/', runScripts: 'outside-only' });
   const win = page.window, doc = win.document;
   if (options.fakeTimers) {
@@ -83,7 +83,11 @@ function fixture(options: { extraVersions?: number; versionTransitionMs?: number
     panel.querySelector('[aria-expanded]')!.addEventListener('click', () => {
       panel.innerHTML = '';
       for (const version of versions) {
-        const row = doc.createElement('div'); row.setAttribute('role', 'menuitemradio'); row.textContent = version.displayTextForIntelligence;
+        const row = doc.createElement('div'); row.setAttribute('role', 'menuitemradio');
+        if (options.versionSubtitle) {
+          const label = doc.createElement('span'); label.className = 'truncate'; label.textContent = version.displayTextForIntelligence;
+          const subtitle = doc.createElement('span'); subtitle.textContent = options.versionSubtitle; row.append(label, subtitle);
+        } else row.textContent = version.displayTextForIntelligence;
         row.addEventListener('keydown', event => { if (event.key !== 'Enter') return; actions('version'); if (frozen) return;
           const apply = () => {
             state.selectedVersionEntry = version; state.bucketSelections = selections[versions.indexOf(version)]!;
@@ -131,6 +135,15 @@ it('rejects a mounted composer hidden by Settings while recognizing the visible 
   expect(f.api.composerVisible()).toBe(true);
   expect(await f.api.inspectModelSettings()).toHaveLength(2);
   expect(f.state.currentBucket).toBe(2);
+});
+it('matches the primary model label when a native version row carries a status subtitle', async () => {
+  const f = fixture({ versionSubtitle: 'Leaving on October 14' });
+  expect(await f.api.selectModelSettings('future-model', 'ultra')).toBe(true);
+  expect(f.state.currentSelection).toMatchObject({ modelSlug: 'future-model', thinkingEffort: 'ultra' });
+});
+it('starts picker state observation without a separate portal-only readiness wait', () => {
+  expect(domSource).not.toContain("!await wait(picker)");
+  expect(domSource).toContain("if (!key(button, 'Enter')) return null;");
 });
 it('confirms the exact model and effort and refuses visible upgrade-only entries', async () => {
   const f = fixture();

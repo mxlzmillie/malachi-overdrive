@@ -19,6 +19,7 @@ import {
   flushRecorder,
   liveConversations,
   queueDeterministicAttributionRepair,
+  recordAgentMessage,
   setAgentBinder,
   setAgentConversationLookup
 } from './session/recorder.js';
@@ -30,7 +31,10 @@ import {
   onSwarmPersist,
   onSwarmPersistNow,
   pauseSwarmForDisable,
+  pendingAgentFinishRequests,
   repairPrimeConversationAfterRecovery,
+  releaseQuiescentRun,
+  resolvePendingAgentFinish,
   restoreRetiredWorkers,
   restoreSwarm,
   snapshotRetiredWorkers,
@@ -39,7 +43,7 @@ import {
   type SwarmSnapshot
 } from './agents.js';
 import { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
-import { restoreRequestCorrelations } from './session/correlation.js';
+import { requestCorrelation, restoreRequestCorrelations } from './session/correlation.js';
 import { restoreBlockedChats } from './session/blocked-chats.js';
 import { stopComputerHelper } from './computer/index.js';
 import {
@@ -439,6 +443,22 @@ void app.whenReady().then(async () => {
   const savedSwarm = await readDurable<SwarmSnapshot>(SWARM_STATE);
   if (windowActivation.isDisabled()) return;
   restoreSwarm(savedSwarm);
+  // Request correlations are restored before the swarm. A crash can therefore leave an exact
+  // worker finish durably pending after its browser request id was already proved. Complete that
+  // same two-phase commit before the bridge opens; no new page observation is required.
+  for (const pending of pendingAgentFinishRequests()) {
+    const correlation = requestCorrelation(pending.requestId);
+    if (!correlation) continue;
+    try {
+      const finished = await resolvePendingAgentFinish(pending.requestId, correlation.conversationId);
+      if (finished?.report) await recordAgentMessage(finished.report, 'sent', finished.info.conversationId);
+      if (finished?.info.runId) releaseQuiescentRun({}, finished.info.runId);
+    } catch (error) {
+      logWarn(
+        `multi-agent: restored pending finish ${pending.requestId.slice(0, 20)}… could not settle — ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
   if (!getConfig().multiAgent.enabled) {
     // A feature toggle is a pause, not Clear swarm. Canonicalize any active incarnation left by
     // a crash into stopped prime-owned history before the bridge exists, then make that safer

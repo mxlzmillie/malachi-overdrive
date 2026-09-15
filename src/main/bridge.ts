@@ -120,6 +120,7 @@ import {
   onReviveRequest,
   onSpawnRequest,
   onSwarmEnd,
+  pendingAgentFinishRequests,
   pendingWorkerRevivals,
   pendingWorkerSpawns,
   primeConversationGone,
@@ -127,6 +128,7 @@ import {
   requestWorkerRevivals,
   rollbackWorkerRevivalClaim,
   releaseQuiescentRun,
+  resolvePendingAgentFinish,
   retiredWorkerForConversation,
   sleepSilentDetachedWorkers,
   occupiesSlot,
@@ -1259,6 +1261,31 @@ function chatIsWorking(conversationId: string): boolean {
   return Boolean(current && (current.generating || current.activeTurnId));
 }
 
+async function reconcilePendingAgentFinishes(requestIds?: readonly string[]): Promise<void> {
+  const wanted = requestIds ? new Set(requestIds) : null;
+  for (const pending of pendingAgentFinishRequests()) {
+    if (wanted && !wanted.has(pending.requestId)) continue;
+    const correlation = requestCorrelation(pending.requestId);
+    if (!correlation) continue;
+    try {
+      const finished = await resolvePendingAgentFinish(pending.requestId, correlation.conversationId);
+      if (!finished) continue;
+      if (finished.report) await recordAgentMessage(finished.report, 'sent', finished.info.conversationId);
+      if (finished.info.runId && finished.info.id !== PRIME_ID) {
+        await wakeQueuedStoppedWorkers([finished.info.id], finished.info.runId);
+        releaseQuiescentRun({}, finished.info.runId);
+      }
+      logInfo(
+        `multi-agent: late finish request ${pending.requestId.slice(0, 20)}… resolved to ${correlation.conversationId}`
+      );
+    } catch (error) {
+      logWarn(
+        `multi-agent: late finish request ${pending.requestId.slice(0, 20)}… could not settle — ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
 async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const { ok: originAllowed, origin } = originOf(req);
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -1568,6 +1595,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // Even an already-confirmed mapping must ensure/reuse the chat session, matching /events'
     // first-observation semantics and making this one atomic operation from the page's view.
     const result = await recordChatObservations(id, observations, agentForOwnedConversation(id));
+    await reconcilePendingAgentFinishes(requestIds);
     const confirmed = requestIds.filter((requestId) => requestCorrelation(requestId)?.conversationId === id);
     return json(res, 200, {
       ok: true,
@@ -1654,6 +1682,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         }
       }
       const result = await recordChatObservations(id, observations, agent);
+      // Page/Fiber request ids are published by recordChatObservations before worker final
+      // reconciliation below. Settle any explicit finish whose exact id just became owned so
+      // browser-owned assistant completion cannot replace the worker's authored finish result.
+      await reconcilePendingAgentFinishes();
       const superseded = await conversationWasSuperseded(id);
       // The stable assistant message, not the page-local turn id, is the exactly-once Goal
       // checkpoint. Freeze app config/key policy before 200 lets the browser retire this
@@ -6319,6 +6351,10 @@ function noteCallAttribution(
   filedSession: SessionSummary | null = null
 ): void {
   if (conversationId) {
+    // A deferred explicit worker finish may have returned before this exact request id became
+    // visible in the page model. The recorder is the post-response attribution boundary, so it
+    // gets one more idempotent chance to publish that held result to the proven worker now.
+    if (requestId) void reconcilePendingAgentFinishes([requestId]);
     // MCP truth can grow while a Pro page emits no new observation. The just-filed
     // canonical summary, not a later browser poll, owns the worker's context meter.
     if (currentConversation && filedSession?.id === sessionId && filedSession.conversationId === conversationId)

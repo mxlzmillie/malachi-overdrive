@@ -12,7 +12,7 @@
  * extension does nothing" into a diagnosable mismatch.
  */
 
-export const APP_VERSION = '2.0.13';
+export const APP_VERSION = '2.0.14';
 
 declare const __MALACHI_OVERDRIVE_RELEASE_REPOSITORY__: string | undefined;
 

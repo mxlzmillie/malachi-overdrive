@@ -11,6 +11,17 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.14] — 2026-09-14
+
+- Fixed GPT-6 Pro/Astra worker completion when ChatGPT publishes the connector request ID only after the `agents finish` result returns. The finish result is now held durably by its exact request ID and committed only after that same ID proves the worker conversation; no active-tab, timing, or model-label guess is used.
+- Preserved normal same-tick finishes through a short exact-ID fast path while removing the long synchronous identity wait that created the Pro circular dependency.
+- Made deferred finish acceptance crash-safe, including the worker result, prime report, and any inbox acknowledgement the finish call itself proves. Restored pending finishes reconcile against the durable request-correlation index before the browser bridge opens.
+- Added endpoint, bridge, and restart regressions for the live failure order: finish result first, exact GPT-6 Pro request ownership later.
+- Keeps the 2.0.13 fresh account-proven GPT-6 Pro admission and no-silent-fallback guarantees unchanged.
+- Updated the ChatGPT picker compatibility path for the current UI: discovery observes React/Fiber readiness directly after opening instead of accepting the portal node too early, and version rows match their primary model label even when ChatGPT adds a deprecation/status subtitle.
+
+See [the full release notes](docs/release-notes/v2.0.14.md).
+
 ## [2.0.13] — 2026-09-14
 
 - Carries the complete 2.0.12 stability-only runtime forward unchanged while keeping the unpublished `v2.0.12` tag immutable.

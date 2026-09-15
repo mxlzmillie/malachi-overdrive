@@ -77,6 +77,13 @@
 .plugin-catalog { margin: 20px 0 28px; }
 .plugin-catalog-card { display: flex; align-items: center; gap: 13px; min-width: 0; min-height: 90px; padding: 15px 16px; border: 1px solid transparent; border-radius: var(--r-lg); background: transparent; color: var(--ink); text-align: left; font: inherit; cursor: pointer; transition: background .14s; }
 .plugin-catalog-card:hover { background: var(--hover); }
+.plugin-resource-card { align-items: flex-start; min-height: 118px; }
+.plugin-resource-card .plugin-card-foot { flex-wrap: wrap; }
+.plugin-resource-license { min-width: 0; color: var(--soft); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
+.plugin-resource-warning { margin: 16px 0; padding: 12px 14px; border: 1px solid var(--accent-edge); border-radius: var(--r-sm); background: var(--accent-wash); color: var(--ink); font-size: 12px; line-height: 1.6; }
+.plugin-resource-meta { color: var(--soft); font-size: 11px; }
+.plugin-resource-command { display: grid; gap: 7px; margin: 16px 0; }
+.plugin-resource-command code { display: block; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--sunk); color: var(--ink); overflow-wrap: anywhere; user-select: text; }
 .plugin-no-results { grid-column: 1 / -1; padding: 24px 0; font-size: 13px; line-height: 1.6; }
 .plugin-empty { grid-column: 1 / -1; display: grid; justify-items: center; padding: 32px 24px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--card); text-align: center; }
 .plugin-empty .plugin-icon { width: 48px; height: 48px; margin-bottom: 14px; }

@@ -11,6 +11,16 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.16] — 2026-09-15
+
+- Added a built-in GitHub tool library to the Plugins screen with reviewed entries for free-for.dev, Public APIs, EasySpider, Awesome MCP Servers, and Strix.
+- Treats catalogue repositories as browsable resources instead of pretending they are executable plugins, keeping upstream content current and avoiding unnecessary source redistribution.
+- Keeps EasySpider as a separate AGPL-3.0 application with direct project/release links rather than bundling its copyleft runtime into MALACHI OVERDRIVE.
+- Adds Strix as an explicit opt-in security-testing resource with its documented agent-skill setup command, an authorization warning, and no automatic cloning, installation, or pentest execution.
+- Added original MALACHI OVERDRIVE artwork, shared metadata, search/detail UI, and regressions proving the five resources cannot silently install or execute third-party code.
+
+See [the full release notes](docs/release-notes/v2.0.16.md).
+
 ## [2.0.15] — 2026-09-15
 
 - Added ATXP as a first-class Goal/Loop API provider through its OpenAI-compatible LLM gateway. Each user supplies their own reusable ATXP connection string, stored only in OS-backed secure storage; one-time OAuth authorize URLs are rejected rather than persisted.

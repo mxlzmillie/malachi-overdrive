@@ -198,3 +198,46 @@ it('waits for explicit sign-in and updates the same detail with a cancellable au
   state.plugins[0]!.status = 'ready'; await refreshPlugins();
   expect(document.querySelector('.plugin-auth')).toBeNull();
 });
+
+it('shows all five reviewed GitHub resources without installing third-party code', async () => {
+  initPlugins(); await tick();
+  const cards = [...document.querySelectorAll<HTMLElement>('#pluginsResources .plugin-resource-card')];
+  expect(cards).toHaveLength(5);
+  expect(cards.map((card) => card.textContent)).toEqual(expect.arrayContaining([
+    expect.stringContaining('free-for.dev'),
+    expect.stringContaining('Public APIs'),
+    expect.stringContaining('EasySpider'),
+    expect.stringContaining('Awesome MCP Servers'),
+    expect.stringContaining('Strix'),
+  ]));
+  expect(api.pluginsInstall).not.toHaveBeenCalled();
+});
+
+it('searches the GitHub tool library and keeps Strix setup explicit and non-executing', async () => {
+  initPlugins(); await tick();
+  const search = document.getElementById('pluginsSearch') as HTMLInputElement;
+  search.value = 'security testing';
+  search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  const cards = [...document.querySelectorAll<HTMLButtonElement>('#pluginsResources .plugin-resource-card')];
+  expect(cards).toHaveLength(1);
+  expect(cards[0]!.textContent).toContain('Strix');
+  cards[0]!.click();
+  expect(document.querySelector('.plugin-resource-warning')!.textContent).toMatch(/explicitly authorized/i);
+  expect(document.querySelector('.plugin-resource-command code')!.textContent).toBe('npx skills add usestrix/strix');
+  expect(api.pluginsInstall).not.toHaveBeenCalled();
+  const copy = [...document.querySelectorAll<HTMLButtonElement>('#pluginDialog button')].find((node) => node.textContent === 'Copy agent setup')!;
+  copy.click(); await tick();
+  expect(api.writeClipboard).toHaveBeenCalledWith('npx skills add usestrix/strix');
+});
+
+it('opens EasySpider upstream releases instead of bundling its AGPL runtime', async () => {
+  initPlugins(); await tick();
+  const card = [...document.querySelectorAll<HTMLButtonElement>('#pluginsResources .plugin-resource-card')]
+    .find((node) => node.textContent?.includes('EasySpider'))!;
+  card.click();
+  expect(document.querySelector('.plugin-resource-meta')!.textContent).toContain('AGPL-3.0');
+  const releases = [...document.querySelectorAll<HTMLButtonElement>('#pluginDialog button')].find((node) => node.textContent === 'Open releases')!;
+  releases.click(); await tick();
+  expect(api.openLink).toHaveBeenCalledWith('https://github.com/NaiboWang/EasySpider/releases');
+  expect(api.pluginsInstall).not.toHaveBeenCalled();
+});

@@ -1,6 +1,7 @@
 import type { AppState } from '../shared/types.js';
 import type { SettingsPatch } from '../preload/index.js';
 import type { PluginSnapshot, PluginView, PluginCatalogEntry, PluginSource } from '../shared/plugins.js';
+import { githubResources, type GithubResourceEntry } from '../shared/github-resources.js';
 import { $, el, run, toast } from './dom.js';
 
 let snapshot: PluginSnapshot = { plugins: [], catalog: [], schemaRevision: 0 };
@@ -145,6 +146,7 @@ function renderInstalled(): void {
   }
   if (snapshot.plugins.length && !list.children.length) list.append(el('p', 'plugin-no-results muted', 'No installed plugins match your search.'));
   renderCatalog($('pluginsExplore'), query);
+  renderGithubResources($('pluginsResources'), query);
   const catalog = document.querySelector<HTMLElement>('#pluginDialog [data-plugin-catalog]');
   if (catalog) renderCatalog(catalog);
   // Keep an open detail view on the same plugin after a tool or status change.
@@ -170,6 +172,40 @@ function renderCatalog(parent: HTMLElement, query = ''): void {
   if (!parent.children.length) parent.append(el('p', 'plugin-no-results muted', query
     ? 'No matching plugins available to add.' : 'All catalog plugins are installed. You can also add your own MCP server.'));
 }
+function renderGithubResources(parent: HTMLElement, query = ''): void {
+  parent.replaceChildren();
+  const normalized = query.trim().toLowerCase();
+  for (const resource of githubResources.filter((entry) =>
+    `${entry.name} ${entry.description} ${entry.badge}`.toLowerCase().includes(normalized))) {
+    const card = button('', () => showGithubResource(resource));
+    card.className = 'plugin-catalog-card plugin-resource-card';
+    card.setAttribute('aria-label', `Open ${resource.name} details`);
+    const text = el('span', 'plugin-card-title');
+    const foot = el('div', 'plugin-card-foot');
+    foot.append(el('span', 'pill', resource.badge), el('span', 'plugin-resource-license', resource.license));
+    text.append(el('h3', '', resource.name), el('p', 'muted', resource.description), foot);
+    card.append(art(resource.icon), text); parent.append(card);
+  }
+  if (!parent.children.length && normalized) parent.append(el('p', 'plugin-no-results muted', 'No GitHub tools match your search.'));
+}
+function showGithubResource(resource: GithubResourceEntry): void {
+  const { body } = dialog(resource.name);
+  const header = el('div', 'plugin-card-head'); header.append(art(resource.icon), el('p', '', resource.description)); body.append(header);
+  if (resource.warning) body.append(el('p', 'plugin-resource-warning', resource.warning));
+  body.append(el('p', 'plugin-resource-meta', `${resource.badge} · ${resource.license}`));
+  if (resource.setupCommand) {
+    const setup = el('div', 'plugin-resource-command');
+    setup.append(el('span', 'muted', 'Optional agent setup'), el('code', '', resource.setupCommand)); body.append(setup);
+  }
+  const actions = el('div', 'plugin-actions');
+  actions.append(button(resource.actionLabel, async () => { await run(window.api.openLink(resource.homepage)); }, true));
+  if (resource.secondaryUrl && resource.secondaryLabel) actions.append(button(resource.secondaryLabel, async () => { await run(window.api.openLink(resource.secondaryUrl!)); }));
+  if (resource.setupCommand) actions.append(button('Copy agent setup', async () => {
+    if (await run(window.api.writeClipboard(resource.setupCommand!))) toast(`${resource.name} setup command copied`);
+  }));
+  body.append(actions, el('p', 'hint', 'This reviewed library entry opens the upstream project. MALACHI OVERDRIVE does not silently clone, execute or enable third-party code from this card.'));
+}
+
 function renderPluginTools(parent: HTMLElement, plugin: PluginView): void {
     const published = plugin.tools.filter(tool => tool.published).length;
     const publication = plugin.tools.some(tool => tool.published !== undefined) ? ` · ${published} available in ChatGPT` : '';

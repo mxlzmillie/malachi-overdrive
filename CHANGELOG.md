@@ -11,6 +11,16 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.15] — 2026-09-15
+
+- Added ATXP as a first-class Goal/Loop API provider through its OpenAI-compatible LLM gateway. Each user supplies their own reusable ATXP connection string, stored only in OS-backed secure storage; one-time OAuth authorize URLs are rejected rather than persisted.
+- Added ATXP model discovery with provider-scoped model memory, so switching between ATXP, OpenRouter and custom endpoints cannot reinterpret or leak another provider’s selected model id.
+- Added a reviewed n8n Automation plugin for an existing n8n Cloud or self-hosted instance. Users provide their instance-level `/mcp-server/http` endpoint and MCP access token; the token stays in encrypted plugin credential storage and is never placed in the URL or plaintext config.
+- Kept n8n as an external integration rather than redistributing its source tree, preserving n8n’s own deployment, account, workflow and license boundaries.
+- Added ATXP transport/security, provider-switch, model-catalogue, n8n endpoint/token, plugin-catalogue, renderer and packaging regressions.
+
+See [the full release notes](docs/release-notes/v2.0.15.md).
+
 ## [2.0.14] — 2026-09-14
 
 - Fixed GPT-6 Pro/Astra worker completion when ChatGPT publishes the connector request ID only after the `agents finish` result returns. The finish result is now held durably by its exact request ID and committed only after that same ID proves the worker conversation; no active-tab, timing, or model-label guess is used.

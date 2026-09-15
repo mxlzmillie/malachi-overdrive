@@ -76,6 +76,8 @@ const KIND_ICON: Record<ActivitySummary['kind'], string> = {
  * A little over one row, so the fetch starts while there is still something to read.
  */
 const GOAL_SCROLL_MARGIN = 72;
+/** ATXP's own reference client uses this gateway-native id; provider switches start here instead of reusing an OpenRouter id. */
+const ATXP_DEFAULT_MODEL = 'gpt-4.1';
 /** Hard renderer budgets: durable history may be larger, but one paint may not be. */
 const MAX_TIMELINE_ROWS = 160;
 const MAX_TIMELINE_TEXT_CHARS = 2 * 1024 * 1024;
@@ -2402,10 +2404,12 @@ export function chatSettingsPatch(current: Config): {
       // The api-backend model is picked from the catalogue and never typed, except on a
       // custom endpoint whose id is typed in its own field instead. `current` is the
       // fallback for the first save after a repaint.
-      model:
-        $<HTMLSelectElement>('goalProvider').value === 'custom'
-          ? $<HTMLInputElement>('goalCustomModel').value.trim() || current.goal.model
-          : goalModel || current.goal.model,
+      model: (() => {
+        const provider = $<HTMLSelectElement>('goalProvider').value;
+        if (provider === 'custom') return $<HTMLInputElement>('goalCustomModel').value.trim() || current.goal.model;
+        if (provider === 'atxp') return goalModelByProvider.atxp;
+        return goalModelByProvider.openrouter;
+      })(),
       reasoning: $<HTMLSelectElement>('goalReasoning').value as Config['goal']['reasoning'],
       // Blank means "restore the safe default", not "send an unconstrained system message".
       prompt: $<HTMLTextAreaElement>('goalPrompt').value.trim() || DEFAULT_GOAL_SYSTEM_PROMPT,
@@ -2429,9 +2433,15 @@ export function chatSettingsPatch(current: Config): {
  * loaded most of the time: an `<input>` would have to hold an id nobody typed, and a
  * `<select>` would have to hold several hundred options nobody asked for.
  */
-let goalModel = DEFAULT_GOAL_MODEL;
+type GoalCatalogProvider = 'openrouter' | 'atxp';
+/** Each hosted catalogue owns its own selection; switching providers never reinterprets an id from the other one. */
+const goalModelByProvider: Record<GoalCatalogProvider, string> = {
+  openrouter: DEFAULT_GOAL_MODEL,
+  atxp: ATXP_DEFAULT_MODEL
+};
 /** The catalogue as far as it has been paged in, and how long it actually is. */
 let goalModels: Array<{ id: string; name: string; created: number; contextLength: number }> = [];
+let goalModelsProvider: GoalCatalogProvider | null = null;
 let goalTotal = 0;
 let goalLoading = false;
 
@@ -2449,19 +2459,22 @@ function releasedOn(created: number): string {
  */
 async function loadGoalModels(reset: boolean): Promise<void> {
   if (goalLoading) return;
+  const provider = $<HTMLSelectElement>('goalProvider').value === 'atxp' ? 'atxp' : 'openrouter';
   goalLoading = true;
-  if (reset) {
+  if (reset || goalModelsProvider !== provider) {
     goalModels = [];
     goalTotal = 0;
+    goalModelsProvider = provider;
   }
-  $('goalModelsState').textContent = 'Loading models from OpenRouter…';
+  const providerLabel = provider === 'atxp' ? 'ATXP' : 'OpenRouter';
+  $('goalModelsState').textContent = `Loading models from ${providerLabel}…`;
   $<HTMLButtonElement>('goalMore').disabled = true;
   const page = await run(api.listGoalModels(goalModels.length));
   goalLoading = false;
   if (!page) {
     // `run` has already shown the reason. Say what it means *here*: the list is empty and
     // the model in use has not changed.
-    $('goalModelsState').textContent = 'OpenRouter could not be reached. The model in use is unchanged.';
+    $('goalModelsState').textContent = `${providerLabel} could not be reached. The model in use is unchanged.`;
     $<HTMLButtonElement>('goalMore').disabled = goalModels.length === 0;
     return;
   }
@@ -2482,7 +2495,7 @@ function paintGoalModels(): void {
     const row = el('button', 'goal-model');
     row.setAttribute('type', 'button');
     row.dataset.model = model.id;
-    if (model.id === goalModel) row.dataset.chosen = '1';
+    if (goalModelsProvider && model.id === goalModelByProvider[goalModelsProvider]) row.dataset.chosen = '1';
     row.append(el('b', 'goal-model-name', model.name));
     const meta = [releasedOn(model.created), model.contextLength > 0 ? `${compactNumber(model.contextLength)} ctx` : '']
       .filter(Boolean)
@@ -2543,10 +2556,12 @@ function applyGoal(state: AppState, previous?: Config): void {
   automation.title = config.sessions.record ? 'Continue this chat automatically' : 'Enable session recording to use Goal or Loop';
   paintAutomationSwitch();
   const secureStorageAvailable = state.secureStorage?.available ?? true;
-  // This picker owns the last known OpenRouter selection. A custom deployment uses
-  // its own input and must not replace that selection during an unrelated repaint.
-  // A session opened directly on custom starts with the picker's defined default.
-  if (config.goal.provider?.kind !== 'custom') goalModel = config.goal.model;
+  // Hosted providers each own one remembered model. Custom deployments use their own
+  // text field and never overwrite either hosted selection during unrelated repaints.
+  const configuredProvider = config.goal.provider?.kind ?? 'openrouter';
+  if (configuredProvider === 'openrouter' || configuredProvider === 'atxp') {
+    goalModelByProvider[configuredProvider] = config.goal.model;
+  }
   applyChatValue($<HTMLSelectElement>('goalReasoning'), config.goal.reasoning, previous?.goal.reasoning);
   applyChatValue($<HTMLTextAreaElement>('goalPrompt'), config.goal.prompt, previous?.goal.prompt);
   applyChatValue($<HTMLTextAreaElement>('mcpInstructions'), config.mcp?.instructions ?? '', previous?.mcp?.instructions);
@@ -2563,14 +2578,23 @@ function applyGoal(state: AppState, previous?: Config): void {
   // Which endpoint the api backend talks to. The key sentence below only applies to
   // OpenRouter: a custom endpoint is often keyless, so a missing key never means custom.
   const customProvider = config.goal.provider?.kind === 'custom';
+  const atxpProvider = config.goal.provider?.kind === 'atxp';
   const providerBaseUrl = config.goal.provider?.baseUrl ?? '';
-  applyChatValue($<HTMLSelectElement>('goalProvider'), customProvider ? 'custom' : 'openrouter', previous?.goal.provider?.kind);
+  const catalogProvider = atxpProvider ? 'atxp' : customProvider ? null : 'openrouter';
+  if (goalModelsProvider !== null && catalogProvider !== goalModelsProvider) {
+    goalModels = [];
+    goalTotal = 0;
+    goalModelsProvider = catalogProvider;
+    $('goalModelList').textContent = '';
+  }
+  applyChatValue($<HTMLSelectElement>('goalProvider'), config.goal.provider?.kind ?? 'openrouter', previous?.goal.provider?.kind);
   applyChatValue($<HTMLInputElement>('goalBaseUrl'), providerBaseUrl, previous?.goal.provider?.baseUrl);
   applyChatValue($<HTMLInputElement>('goalCustomModel'), config.goal.model, previous?.goal.model);
   $('goalCustomPanel').hidden = !customProvider;
   $('goalPickerRow').hidden = customProvider;
   if (customProvider) $('goalModels').hidden = true;
-  $('goalKeyField').hidden = customProvider;
+  $('goalKeyField').hidden = customProvider || atxpProvider;
+  $('goalAtxpPanel').hidden = !atxpProvider;
   $('goalModelName').textContent = config.goal.model;
   const goalKey = $<HTMLInputElement>('goalKey');
   goalKey.placeholder = state.hasGoalKey ? '•••••••• stored' : 'sk-or-v1-…';
@@ -2582,6 +2606,16 @@ function applyGoal(state: AppState, previous?: Config): void {
       : 'Stored with secure OS credential storage. It never leaves this app, and the browser is only ever handed the reply.';
   $('goalKeyState').classList.toggle('is-warn', !secureStorageAvailable);
   $<HTMLButtonElement>('goalKeyRemove').disabled = !state.hasGoalKey || !secureStorageAvailable;
+  const atxpConnection = $<HTMLInputElement>('goalAtxpConnection');
+  atxpConnection.placeholder = state.hasAtxpConnection ? '•••••••• stored' : 'https://accounts.atxp.ai?connection_token=…&account_id=…';
+  atxpConnection.disabled = !secureStorageAvailable;
+  $('goalAtxpConnectionState').textContent = !secureStorageAvailable
+    ? (state.secureStorage?.detail ?? 'Secure credential storage is unavailable.')
+    : state.hasAtxpConnection
+      ? 'An ATXP connection is stored with secure OS credential storage. Type a new one to replace it.'
+      : 'Stored with secure OS credential storage and sent only by the app to llm.atxp.ai. The browser receives only the reply.';
+  $('goalAtxpConnectionState').classList.toggle('is-warn', !secureStorageAvailable);
+  $<HTMLButtonElement>('goalAtxpConnectionRemove').disabled = !state.hasAtxpConnection || !secureStorageAvailable;
   const goalCustomKey = $<HTMLInputElement>('goalCustomKey');
   goalCustomKey.placeholder = state.hasCustomProviderKey ? '•••••••• stored' : 'leave empty for a keyless local server';
   goalCustomKey.disabled = !secureStorageAvailable;
@@ -2645,11 +2679,12 @@ function wireGoal(save: () => Promise<void>): void {
   $('goalModelList').addEventListener('click', (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-model]');
     if (!row?.dataset.model) return;
-    goalModel = row.dataset.model;
-    $('goalModelName').textContent = goalModel;
+    const provider: GoalCatalogProvider = $<HTMLSelectElement>('goalProvider').value === 'atxp' ? 'atxp' : 'openrouter';
+    goalModelByProvider[provider] = row.dataset.model;
+    $('goalModelName').textContent = row.dataset.model;
     paintGoalModels();
     void save();
-    toast(`Goal model set to ${goalModel}`);
+    toast(`Goal model set to ${row.dataset.model}`);
   });
   // On blur, like every other key in this app: not saved keystroke by keystroke, and the
   // field is emptied the moment it has been handed over.
@@ -2674,6 +2709,25 @@ function wireGoal(save: () => Promise<void>): void {
     if (next) {
       applyGoal(next);
       toast('OpenRouter key removed');
+    }
+  });
+  $('goalAtxpConnection').addEventListener('blur', async () => {
+    const input = $<HTMLInputElement>('goalAtxpConnection');
+    const submitted = input.value;
+    const connection = submitted.trim();
+    if (connection === '') return;
+    const next = await run(api.setAtxpConnection(connection));
+    if (next) {
+      if (input.value === submitted) input.value = '';
+      applyGoal(next);
+      toast('ATXP connection stored');
+    }
+  });
+  $('goalAtxpConnectionRemove').addEventListener('click', async () => {
+    const next = await run(api.setAtxpConnection(''));
+    if (next) {
+      applyGoal(next);
+      toast('ATXP connection removed');
     }
   });
   // Same blur-to-save discipline as the OpenRouter key above. Empty submits nothing:

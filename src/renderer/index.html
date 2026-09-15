@@ -673,10 +673,11 @@
                   <div class="setting">
                     <span class="setting-text">
                       <b>Provider</b>
-                      <em>OpenRouter, or your own OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, a gateway) for the API response source.</em>
+                      <em>OpenRouter, ATXP, or your own OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, a gateway) for the API response source.</em>
                     </span>
                     <select id="goalProvider">
                       <option value="openrouter">OpenRouter</option>
+                      <option value="atxp">ATXP</option>
                       <option value="custom">Custom endpoint</option>
                     </select>
                   </div>
@@ -694,6 +695,18 @@
                     <div class="step-actions">
                       <button class="btn" id="goalCustomKeyRemove" type="button">Remove stored key</button>
                     </div>
+                  </div>
+                  <div class="field" id="goalAtxpPanel" hidden>
+                    <label for="goalAtxpConnection">ATXP connection string</label>
+                    <input id="goalAtxpConnection" type="password" spellcheck="false" placeholder="https://accounts.atxp.ai?connection_token=…&amp;account_id=…" autocomplete="off" />
+                    <p class="hint" id="goalAtxpConnectionState"></p>
+                    <div class="step-actions">
+                      <button class="btn" id="goalAtxpConnectionRemove" type="button">Remove stored connection</button>
+                      <button class="btn" type="button" data-link="https://accounts.atxp.ai/">
+                        <svg class="ico" viewBox="0 0 24 24"><use href="#i-out" /></svg>Open ATXP account
+                      </button>
+                    </div>
+                    <p class="hint">Use your reusable ATXP connection string. One-time OAuth authorize URLs containing state or code_challenge are never stored here.</p>
                   </div>
                   <div class="field" id="goalKeyField">
                     <label for="goalKey">OpenRouter API key</label>

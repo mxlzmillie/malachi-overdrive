@@ -12,14 +12,20 @@ it('uses reviewed transitional licenses only for the exact installed distributio
   expect(reviewedPluginLicense({ ...fetch.source, version: '2099.1.0' }, 'See installed dist-info licenses')).toBe('See installed dist-info licenses');
 });
 
-it('offers seven distinct reviewed recipes with packaged local artwork', async () => {
-  expect(pluginCatalog).toHaveLength(7);
+it('offers eight distinct reviewed recipes with packaged local artwork', async () => {
+  expect(pluginCatalog).toHaveLength(8);
   expect(new Set(pluginCatalog.map(recipe => recipe.id)).size).toBe(pluginCatalog.length);
   for (const recipe of pluginCatalog) {
     if (recipe.source.kind === 'remote') {
-      expect(recipe.source.auth).toBe('oauth');
-      expect(recipe.source.url).toMatch(/^https:\/\//);
       expect(recipe.source.version).toBeUndefined();
+      if (recipe.sourceUrlField) {
+        expect(recipe.source.url).toBeUndefined();
+        expect(recipe.sourceUrlField.required).toBe(true);
+        expect(recipe.source.auth).toBeUndefined();
+      } else {
+        expect(recipe.source.auth).toBe('oauth');
+        expect(recipe.source.url).toMatch(/^https:\/\//);
+      }
     } else expect(recipe.source.version).toMatch(/^\d+(\.\d+)+([a-z0-9.+_-]*)$/i);
     await expect(fs.access(new URL(`../src/renderer/plugin-icons/${recipe.icon}.svg`, import.meta.url))).resolves.toBeUndefined();
   }
@@ -27,7 +33,7 @@ it('offers seven distinct reviewed recipes with packaged local artwork', async (
 
 it('keeps the curated catalog focused on capabilities beyond Core file and exec tools', () => {
   expect(pluginCatalog.map(recipe => recipe.id)).toEqual([
-    'blender', 'memory', 'playwright', 'fetch', 'heygen', 'recraft', 'unity',
+    'blender', 'memory', 'playwright', 'fetch', 'heygen', 'recraft', 'n8n', 'unity',
   ]);
   for (const recipe of pluginCatalog) {
     expect(recipe.tools?.length).toBeGreaterThan(0);
@@ -40,13 +46,15 @@ it('keeps the curated catalog focused on capabilities beyond Core file and exec 
 it('preserves an exact license reference for every pinned catalog distribution', async () => {
   const directory = new URL('../docs/licenses/plugins/', import.meta.url);
   const inventory = JSON.parse(await fs.readFile(new URL('inventory.json', directory), 'utf8')) as {
-    id: string; package?: string; version?: string; endpoint?: string; notices: { file: string; sha256: string }[];
+    id: string; package?: string; version?: string; endpoint?: string; endpointPattern?: string; notices: { file: string; sha256: string }[];
   }[];
   expect(inventory.map(row => row.id).sort()).toEqual(pluginCatalog.map(row => row.id).sort());
   for (const recipe of pluginCatalog) {
     const record = inventory.find(row => row.id === recipe.id)!;
-    if (recipe.source.kind === 'remote') expect(record.endpoint).toBe(recipe.source.url);
-    else {
+    if (recipe.source.kind === 'remote') {
+      if (recipe.sourceUrlField) expect(record.endpointPattern).toBe(recipe.sourceUrlField.placeholder);
+      else expect(record.endpoint).toBe(recipe.source.url);
+    } else {
       expect(record.package).toBe(recipe.source.package);
       expect(record.version).toBe(recipe.source.version);
     }

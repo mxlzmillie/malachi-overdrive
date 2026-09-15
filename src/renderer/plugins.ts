@@ -249,6 +249,10 @@ function showRecipe(recipe: PluginCatalogEntry): void {
   }
   const setup = document.createElement('details'); setup.className = 'plugin-about'; setup.append(el('summary', '', 'Setup requirements'));
   const steps = el('ol', 'plugin-steps'); for (const step of recipe.instructions) steps.append(el('li', '', step)); setup.append(steps, button('Open project & setup guide', async () => { await run(window.api.openLink(recipe.homepage)); })); body.append(setup);
+  const sourceUrl = recipe.sourceUrlField
+    ? field(body, recipe.sourceUrlField.label, '', false, recipe.sourceUrlField.placeholder)
+    : null;
+  if (sourceUrl) sourceUrl.required = !!recipe.sourceUrlField?.required;
   const values = new Map<string, HTMLInputElement>();
   for (const item of recipe.fields) { const input = field(body, item.label, '', item.secret, item.placeholder); input.required = !!item.required; values.set(item.key, input); }
   const remote = recipe.source.kind === 'remote';
@@ -256,10 +260,12 @@ function showRecipe(recipe: PluginCatalogEntry): void {
     ? `${recipe.license}. Connect your account through the provider. Its plan and usage limits apply.`
     : `License: ${recipe.license}. Installation downloads and runs third-party code as your OS user. “Ready” requires a successful connection and tool discovery.`));
   actions.append(button(remote ? 'Add connection' : 'Install and connect', async () => {
+    if (sourceUrl && recipe.sourceUrlField?.required && !sourceUrl.value.trim()) { sourceUrl.focus(); throw new Error(`${recipe.sourceUrlField.label} is required.`); }
     for (const item of recipe.fields) if (item.required && !values.get(item.key)!.value.trim()) { values.get(item.key)!.focus(); throw new Error(`${item.label} is required.`); }
     const config: Record<string,string> = {}; const credentials: Record<string,string> = {};
     for (const item of recipe.fields) (item.secret ? credentials : config)[item.key] = values.get(item.key)!.value;
-    if (await mutate(window.api.pluginsInstall({ catalogId: recipe.id, config, credentials }))) {
+    const source = sourceUrl ? { ...recipe.source, url: sourceUrl.value.trim() } : undefined;
+    if (await mutate(window.api.pluginsInstall({ catalogId: recipe.id, ...(source ? { source } : {}), config, credentials }))) {
       box.close();
       if (remote) { const installed = snapshot.plugins.find(plugin => plugin.catalogId === recipe.id); if (installed) showPlugin(installed); }
     }

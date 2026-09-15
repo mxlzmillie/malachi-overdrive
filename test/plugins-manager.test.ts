@@ -52,6 +52,13 @@ describe('external plugin authority', () => {
     expect(inherited.PATH).toBe('/custom/bin:/usr/bin:/bin');
   });
 
+  it('requires a user-specific endpoint for reviewed dynamic remote recipes', async () => {
+    await expect(manager.install({ catalogId: 'n8n', credentials: { token: 'private-token' } }))
+      .rejects.toThrow('n8n MCP server URL is required');
+    expect(manager.snapshot().plugins).toEqual([]);
+    expect([...secrets.values()]).toEqual([]);
+  });
+
   it('projects reviewed license terms for existing installations without reinstalling them', async () => {
     vi.spyOn(pluginInstaller, 'installSource').mockResolvedValueOnce({
       command: process.execPath, args: [entry], version: '2026.8.31', license: 'MIT',

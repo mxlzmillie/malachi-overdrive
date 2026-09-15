@@ -58,11 +58,11 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
  */
 /**
  * `bridgeToken` is not a user credential either way; `openRouterApiKey` and
- * `customProviderApiKey` are the two credentials a *model* can cause to be spent (Goal/Loop
+ * `atxpConnection` and `customProviderApiKey` are credentials a *model* can cause to be spent (Goal/Loop
  * drafts, one per active provider), so they live under the same OS-backed encrypted blob
  * as the rest and never leave the main process.
  */
-export type SecretKey = 'openaiApiKey' | 'bridgeToken' | 'openRouterApiKey' | 'customProviderApiKey' | `plugin:${string}`;
+export type SecretKey = 'openaiApiKey' | 'bridgeToken' | 'openRouterApiKey' | 'atxpConnection' | 'customProviderApiKey' | `plugin:${string}`;
 
 export function initSecretsPath(userDataDir: string): void {
   secretsPath = path.join(userDataDir, FILE_NAME);

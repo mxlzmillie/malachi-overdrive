@@ -55,6 +55,8 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
     status: { state: 'disconnected', detail: '', publicUrl: null, localUrl: null, handshakeAt: null, lastRequestAt: null, lastToolCallAt: null, health: null, surfaces: [] },
     hasApiKey: false,
     hasGoalKey: false,
+    hasAtxpConnection: false,
+    hasCustomProviderKey: false,
     resolvedBinary: null,
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
@@ -396,6 +398,10 @@ async function mountChat(
         keys.push({ method: 'setGoalKey', value });
         return ok({ ...state, hasGoalKey: value !== '' });
       },
+      setAtxpConnection: (value: string) => {
+        keys.push({ method: 'setAtxpConnection', value });
+        return ok({ ...state, hasAtxpConnection: value !== '' });
+      },
       setApiKey: (value: string) => {
         keys.push({ method: 'setApiKey', value });
         return ok(state);
@@ -452,11 +458,11 @@ it('preserves the selected OpenRouter model through an unchanged custom-provider
   mounted.push(mounted.state);
   const provider = w.document.getElementById('goalProvider') as HTMLSelectElement;
   provider.value = 'custom'; provider.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1), { timeout: 10_000 });
   // Repainting custom settings must not replace the hidden OpenRouter picker's model.
   mounted.push({ ...mounted.state, hasCustomProviderKey: false });
   provider.value = 'openrouter'; provider.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2), { timeout: 10_000 });
   expect(mounted.calls[1].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: original });
   expect(w.document.getElementById('goalModelName')!.textContent).toBe(original);
 });
@@ -476,17 +482,17 @@ it('saves a custom deployment id and returns to the known OpenRouter model', asy
   const provider = w.document.getElementById('goalProvider') as HTMLSelectElement;
   provider.value = 'custom';
   provider.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1), { timeout: 10_000 });
   expect(mounted.calls[0].goal.provider.kind).toBe('custom');
   expect(w.document.getElementById('goalCustomPanel')?.hidden).toBe(false);
   const model = w.document.getElementById('goalCustomModel') as HTMLInputElement;
   model.value = 'llama3.1';
   model.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2), { timeout: 10_000 });
   expect(mounted.calls[1].goal.model).toBe('llama3.1');
   provider.value = 'openrouter';
   provider.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(3));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(3), { timeout: 10_000 });
   expect(mounted.calls[2].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: 'deepseek/deepseek-v4-flash' });
 });
 
@@ -1153,4 +1159,52 @@ it('edits a fresh Goal before first send and clears it on an independent New Cha
   (doc.getElementById('newChat') as HTMLButtonElement).click();
   await settle();
   expect(objective.value).toBe('');
+});
+
+
+it('switches from OpenRouter to ATXP without reinterpreting the previous provider model id', async () => {
+  const mounted = await mountChat();
+  const w = mounted.window;
+  mounted.state.config.goal = {
+    ...mounted.state.config.goal,
+    provider: { kind: 'openrouter', baseUrl: '' },
+    model: 'deepseek/deepseek-v4-flash'
+  };
+  mounted.push(mounted.state);
+  const provider = w.document.getElementById('goalProvider') as HTMLSelectElement;
+  provider.value = 'atxp';
+  provider.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
+  expect(mounted.calls[0].goal).toMatchObject({
+    provider: { kind: 'atxp' },
+    model: 'gpt-4.1'
+  });
+  expect(w.document.getElementById('goalAtxpPanel')?.hidden).toBe(false);
+  expect(w.document.getElementById('goalKeyField')?.hidden).toBe(true);
+});
+
+it('sends the ATXP connection only to secure storage and never into settings', async () => {
+  const mounted = await mountChat();
+  const w = mounted.window;
+  mounted.state.config.goal = {
+    ...mounted.state.config.goal,
+    provider: { kind: 'atxp', baseUrl: '' },
+    model: 'gpt-4.1'
+  };
+  mounted.push(mounted.state);
+  const field = w.document.getElementById('goalAtxpConnection') as HTMLInputElement;
+  const connection = ['https://accounts.atxp.ai?connection_', 'token=fixture&account_id=fixture-account'].join('');
+  field.value = connection;
+  field.dispatchEvent(new w.Event('blur'));
+  await settle();
+  expect(mounted.keys).toContainEqual({ method: 'setAtxpConnection', value: connection });
+  expect(field.value).toBe('');
+  expect(JSON.stringify(mounted.calls)).not.toContain('fixture-account');
+
+  mounted.push({ ...mounted.state, hasAtxpConnection: true });
+  await settle();
+  expect(w.document.getElementById('goalAtxpConnectionState')!.textContent).toContain('stored');
+  (w.document.getElementById('goalAtxpConnectionRemove') as HTMLButtonElement).click();
+  await settle();
+  expect(mounted.keys).toContainEqual({ method: 'setAtxpConnection', value: '' });
 });

@@ -2639,3 +2639,94 @@ describe('a custom OpenAI-compatible provider', () => {
     expect(goal.resolveGoalBaseUrl({ kind: 'openrouter', baseUrl: '' })).toBe('https://openrouter.ai/api/v1');
   });
 });
+
+
+describe('the ATXP LLM gateway provider', () => {
+  const connection = ['https://accounts.atxp.ai?connection_', 'token=fixture&account_id=fixture-account'].join('');
+
+  async function useAtxp(over: Record<string, unknown> = {}): Promise<void> {
+    await saveConfig({
+      ...defaultConfig(),
+      goal: {
+        ...defaultConfig().goal,
+        enabled: true,
+        backend: 'api',
+        loopBackend: 'api',
+        model: 'gpt-4.1',
+        reasoning: 'default',
+        provider: { kind: 'atxp', baseUrl: '' },
+        ...over
+      }
+    });
+    await setSecret('atxpConnection', connection);
+  }
+
+  async function userSession(conversationId: string): Promise<{ id: string }> {
+    const session = await createSession({ title: 'ATXP goal', conversationId });
+    await appendEvent(session.id, {
+      time: 1_000, source: 'extension', kind: 'user_message',
+      message: { text: 'finish the integration', truncated: false, chars: 22 }
+    });
+    return session;
+  }
+
+  it('uses the fixed ATXP gateway with the full reusable connection as its bearer credential', async () => {
+    await useAtxp();
+    const session = await userSession('c-atxp-1');
+    let sent: any = null;
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      sent = { url, headers: init.headers, body: JSON.parse(String(init.body)) };
+      return decision('continue', 'verify the release next');
+    }) as never;
+
+    goal.startGoalDraft({ sessionId: session.id, conversationId: 'c-atxp-1', turnId: 'g-atxp-1' });
+    const view = await settled('c-atxp-1');
+    expect(view.stage).toBe('ready');
+    expect(sent.url).toBe('https://llm.atxp.ai/v1/chat/completions');
+    expect((sent.headers as Record<string, string>).authorization).toBe(`Bearer ${connection}`);
+    expect(sent.headers).not.toHaveProperty('HTTP-Referer');
+    expect(sent.headers).not.toHaveProperty('X-Title');
+    expect(sent.body.model).toBe('gpt-4.1');
+    expect(sent.body).not.toHaveProperty('plugins');
+    expect(sent.body).not.toHaveProperty('provider');
+    expect(sent.body).not.toHaveProperty('reasoning');
+    expect(sent.body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('requires its own credential and reads ATXP models without reusing another provider cache', async () => {
+    await useAtxp();
+    await setSecret('atxpConnection', '');
+    expect(await goal.goalKeyPresent()).toBe(false);
+    await setSecret('atxpConnection', connection);
+    expect(await goal.goalKeyPresent()).toBe(true);
+
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      expect(String(url)).toBe('https://llm.atxp.ai/v1/models');
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${connection}`);
+      return Response.json({ data: [
+        { id: 'openai/gpt-4.1', name: 'GPT-4.1', created: 2 },
+        { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', created: 1 },
+        { id: 'gpt-4.1', name: 'Duplicate native id', created: 0 }
+      ] });
+    }) as never;
+    const atxp = await goal.listGoalModels(0, 20);
+    expect(atxp.models.map(model => model.id)).toEqual(['gpt-4.1', 'claude-sonnet-4']);
+
+    const config = defaultConfig();
+    await saveConfig({
+      ...config,
+      goal: {
+        ...config.goal,
+        backend: 'api',
+        provider: { kind: 'openrouter', baseUrl: '' },
+        model: 'openai/gpt-4.1'
+      }
+    });
+    globalThis.fetch = (async (url: string) => {
+      expect(String(url)).toBe('https://openrouter.ai/api/v1/models');
+      return Response.json({ data: [{ id: 'openai/gpt-4.1', name: 'OpenRouter GPT-4.1', created: 3 }] });
+    }) as never;
+    const openrouter = await goal.listGoalModels(0, 20);
+    expect(openrouter.models.map(model => model.id)).toEqual(['openai/gpt-4.1']);
+  });
+});

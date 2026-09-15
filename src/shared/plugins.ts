@@ -38,6 +38,8 @@ export interface PluginCatalogEntry {
   license: string;
   instructions: string[];
   fields: PluginField[];
+  /** A reviewed remote recipe may require the user-specific MCP endpoint at install time. */
+  sourceUrlField?: Omit<PluginField, 'secret'>;
   /** Representative tool names or documented action labels; live discovery determines actual tools. */
   tools?: string[];
 }

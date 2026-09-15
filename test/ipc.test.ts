@@ -38,7 +38,7 @@ vi.mock('../src/main/extension-path.js', () => ({ extensionDir: () => process.cw
 vi.mock('../src/main/browser.js', () => ({ openInPreferredBrowser: vi.fn(async () => 'chrome.exe') }));
 
 const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
-const { initSecretsPath, resetSecretsCacheForTests } = await import('../src/main/secrets.js');
+const { getSecret, initSecretsPath, resetSecretsCacheForTests } = await import('../src/main/secrets.js');
 const { appendEvent, createSession, initSessionStore, rebindSession, resetSessionStoreForTests } = await import('../src/main/session/store.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
 const { pendingCommands, resetBridgeForTests, setBrowserOpener, startBridge, stopBridge } = await import(
@@ -1152,5 +1152,51 @@ describe('Stop IPC exact session and turn authority', () => {
     expect((await invoke({ id: session.id, expectedTurnId: 'ipc-stop-one' })).ok).toBe(false);
     const missing = await createSession({ title: 'No browser ownership', conversationId: null });
     expect(await invoke({ id: missing.id, expectedTurnId: 'ipc-stop-one' })).toMatchObject({ ok: false, error: 'session_not_recorded' });
+  });
+});
+
+
+describe('the ATXP provider boundary', () => {
+  const storeSecret = (payload: unknown): Promise<any> =>
+    handlers.get('secret:set')!(null, payload) as Promise<any>;
+
+  it('accepts an ATXP-native model id without a custom endpoint URL', async () => {
+    // This schema test does not exercise BrowserWindow painting; re-register the same
+    // named IPC surface with no window so unrelated late renderer notifications cannot race it.
+    registerIpc(() => null, () => undefined);
+    const base = settings({ record: false, multiAgent: false });
+    const reply = await save({
+      ...base,
+      goal: {
+        ...base.goal,
+        provider: { kind: 'atxp' as const, baseUrl: '' },
+        model: 'gpt-4.1'
+      }
+    });
+    expect(reply.ok, reply.error).toBe(true);
+    expect(getConfig().goal.provider).toEqual({ kind: 'atxp', baseUrl: '' });
+    expect(getConfig().goal.model).toBe('gpt-4.1');
+  });
+
+  it('stores only a reusable ATXP connection and never returns it through app state', async () => {
+    const connection = ['https://accounts.atxp.ai?connection_', 'token=fixture&account_id=fixture-account'].join('');
+    const stored = await storeSecret({ value: `  ${connection}  `, key: 'atxpConnection' });
+    expect(stored.ok, stored.error).toBe(true);
+    expect(stored.data.hasAtxpConnection).toBe(true);
+    expect(await getSecret('atxpConnection')).toBe(connection);
+    expect(JSON.stringify(stored.data)).not.toContain('fixture-account');
+
+    const authorize = [
+      'https://accounts.atxp.ai/authorize?state=temporary&client_id=client&response_type=code&code_',
+      'challenge=temporary&redirect_uri=https%3A%2F%2Fexample.invalid%2Fcallback'
+    ].join('');
+    const rejected = await storeSecret({ value: authorize, key: 'atxpConnection' });
+    expect(rejected.ok).toBe(false);
+    expect(rejected.error).toMatch(/reusable ATXP connection string|not an OAuth authorize URL/i);
+    expect(await getSecret('atxpConnection')).toBe(connection);
+
+    const cleared = await storeSecret({ value: '', key: 'atxpConnection' });
+    expect(cleared.ok).toBe(true);
+    expect(cleared.data.hasAtxpConnection).toBe(false);
   });
 });

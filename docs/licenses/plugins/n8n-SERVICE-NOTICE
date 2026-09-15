@@ -1,0 +1,12 @@
+n8n Automation integration
+
+Upstream project: https://github.com/n8n-io/n8n
+MCP endpoint: a user-selected n8n instance whose instance-level MCP server ends in /mcp-server/http
+Upstream license: n8n Sustainable Use License, with separate Enterprise License terms for enterprise-licensed source.
+License text: https://github.com/n8n-io/n8n/blob/master/LICENSE.md
+
+MALACHI OVERDRIVE does not bundle or redistribute n8n through this recipe. The recipe connects to an n8n Cloud or self-hosted instance that the user chooses and authenticates with that instance's MCP access token. The n8n instance, workflows, credentials, plan, service terms and upstream license remain the user's/provider's responsibility.
+
+The catalog illustration is original MALACHI OVERDRIVE artwork and is not the n8n logo. n8n is a trademark/product name of its respective owner.
+
+Reviewed 2026-09-15.

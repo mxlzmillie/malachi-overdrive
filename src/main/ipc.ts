@@ -203,7 +203,7 @@ const settingsPatch = z.object({
     objectivePrompt: z.string().trim().min(1).max(MAX_GOAL_SYSTEM_PROMPT_CHARS),
     loopPrompt: z.string().trim().min(1).max(MAX_GOAL_SYSTEM_PROMPT_CHARS)
   }).superRefine((goal, ctx) => {
-    if (goal.provider.kind !== 'custom' && !/^~?[a-z0-9._-]+\/[a-z0-9._-]+(:[a-z0-9._-]+)?$/i.test(goal.model)) {
+    if (goal.provider.kind === 'openrouter' && !/^~?[a-z0-9._-]+\/[a-z0-9._-]+(:[a-z0-9._-]+)?$/i.test(goal.model)) {
       ctx.addIssue({
         code: 'custom',
         path: ['model'],
@@ -354,6 +354,7 @@ async function buildState(): Promise<AppState> {
     secureStorage: await secureStorageStatus(),
     hasApiKey: await hasSecret('openaiApiKey'),
     hasGoalKey: await hasSecret('openRouterApiKey'),
+    hasAtxpConnection: await hasSecret('atxpConnection'),
     hasCustomProviderKey: await hasSecret('customProviderApiKey'),
     resolvedBinary: resolvedBinary(config),
     bundledTunnelVersion: bundledVersion(),
@@ -600,18 +601,35 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   handle('secret:set', async (payload) => {
     const { value, key } = z
       .object({
-        value: z.string().max(500),
-        key: z.enum(['openaiApiKey', 'openRouterApiKey', 'customProviderApiKey']).default('openaiApiKey')
+        value: z.string().max(4096),
+        key: z.enum(['openaiApiKey', 'openRouterApiKey', 'atxpConnection', 'customProviderApiKey']).default('openaiApiKey')
       })
       .parse(payload);
+    // ATXP connection URLs are longer than ordinary API keys; keep the previous 500-byte
+    // ceiling for every other credential instead of silently widening their IPC surface.
+    if (key !== 'atxpConnection' && value.length > 500) throw new Error('Credential is too long.');
     if (!(await isEncryptionAvailable())) {
       throw new Error('Secure OS credential storage is unavailable, so the key cannot be stored safely.');
     }
-    await setSecret(key, value);
-    const activeGoalKey = getConfig().goal.provider.kind === 'custom' ? 'customProviderApiKey' : 'openRouterApiKey';
+    let storedValue = value;
+    if (key === 'atxpConnection' && value.trim() !== '') {
+      const candidate = value.trim();
+      let url: URL;
+      try { url = new URL(candidate); }
+      catch { throw new Error('Paste the reusable ATXP connection string, not an OAuth authorize URL.'); }
+      const forbidden = ['state', 'code_challenge', 'client_id', 'redirect_uri'].some(name => url.searchParams.has(name));
+      if (url.origin !== 'https://accounts.atxp.ai' || url.pathname !== '/' || url.hash || forbidden ||
+          !url.searchParams.get('connection_token') || !url.searchParams.get('account_id')) {
+        throw new Error('Paste the reusable ATXP connection string with connection_token and account_id, not an OAuth authorize URL.');
+      }
+      storedValue = candidate;
+    }
+    await setSecret(key, storedValue);
+    const provider = getConfig().goal.provider.kind;
+    const activeGoalKey = provider === 'custom' ? 'customProviderApiKey' : provider === 'atxp' ? 'atxpConnection' : 'openRouterApiKey';
     if (key === activeGoalKey) retireGoalDrafts();
-    const what = key === 'openRouterApiKey' ? 'openrouter key' : key === 'customProviderApiKey' ? 'custom provider key' : 'api key';
-    logInfo(value.trim() === '' ? `${what} cleared` : `${what} stored`);
+    const what = key === 'openRouterApiKey' ? 'openrouter key' : key === 'atxpConnection' ? 'ATXP connection' : key === 'customProviderApiKey' ? 'custom provider key' : 'api key';
+    logInfo(storedValue.trim() === '' ? `${what} cleared` : `${what} stored`);
     return buildState();
   });
 

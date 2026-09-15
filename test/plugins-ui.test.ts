@@ -146,6 +146,28 @@ it('opens a concise tool preview without installing or showing enabled-tool cont
   expect(api.pluginsInstall).not.toHaveBeenCalled();
 });
 
+it('connects a reviewed dynamic remote recipe with its exact endpoint and encrypted token field', async () => {
+  state.catalog = [{
+    id: 'n8n', icon: 'memory', color: '#ff6d5a', name: 'n8n Automation', description: 'Workflow automation',
+    source: { kind: 'remote' }, homepage: 'https://github.com/n8n-io/n8n', license: 'n8n terms',
+    sourceUrlField: { key: 'mcpUrl', label: 'n8n MCP server URL', required: true, placeholder: 'https://your-n8n-host/mcp-server/http' },
+    instructions: ['Enable MCP Access in n8n.'], fields: [{ key: 'token', label: 'n8n MCP access token', secret: true, required: true }],
+  }];
+  state.plugins = []; initPlugins(); await tick();
+  document.querySelector<HTMLButtonElement>('#pluginsExplore .plugin-catalog-card')!.click();
+  const inputs = [...document.querySelectorAll<HTMLInputElement>('#pluginDialog input')];
+  expect(inputs).toHaveLength(2);
+  inputs[0]!.value = 'https://my-company.app.n8n.cloud/mcp-server/http';
+  inputs[1]!.value = 'n8n-private-token';
+  [...document.querySelectorAll<HTMLButtonElement>('#pluginDialog button')].find(button => button.textContent === 'Add connection')!.click();
+  await tick();
+  expect(api.pluginsInstall).toHaveBeenCalledWith({
+    catalogId: 'n8n',
+    source: { kind: 'remote', url: 'https://my-company.app.n8n.cloud/mcp-server/http' },
+    config: {}, credentials: { token: 'n8n-private-token' },
+  });
+});
+
 it('opens the full error from the compact card and exposes configuration beside the introduction', async () => {
   const error = 'Connection refused. Start the application and enable its companion integration.';
   state.plugins[0]!.error = error;

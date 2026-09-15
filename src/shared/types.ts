@@ -224,12 +224,13 @@ export type GoalBackend = 'api' | 'chatgpt' | 'templates';
 /**
  * Where the Goal/Loop second model runs when the backend is `api`.
  *
- * `openrouter` is the shipped default: OpenRouter's catalogue, key and routing. `custom`
+ * `openrouter` is the shipped default: OpenRouter's catalogue, key and routing. `atxp` uses
+ * ATXP's OpenAI-compatible LLM Gateway with the user's own connection string. `custom`
  * points at any OpenAI-compatible `/chat/completions` endpoint the user runs themselves
  * (Ollama, vLLM, LM Studio, a gateway) and is used with that endpoint's own model id.
  * The other backends (`chatgpt`, `templates`) never read this block.
  */
-export const GOAL_PROVIDERS = ['openrouter', 'custom'] as const;
+export const GOAL_PROVIDERS = ['openrouter', 'atxp', 'custom'] as const;
 export type GoalProviderKind = (typeof GOAL_PROVIDERS)[number];
 
 export interface GoalProviderSettings {
@@ -260,7 +261,7 @@ export interface GoalSettings {
    */
   mode: GoalMode;
   provider: GoalProviderSettings;
-  /** A model id: an OpenRouter id while the provider is openrouter, the endpoint's own id while custom. */
+  /** A model id: OpenRouter's vendor/model id, or the endpoint-native id for ATXP/custom. */
   model: string;
   reasoning: GoalReasoning;
   /** Editable continuation-gate instruction sent as the OpenRouter system message. */
@@ -562,6 +563,8 @@ export interface AppState {
   hasApiKey: boolean;
   /** True when an OpenRouter key is stored, which is what the goal loop spends on that provider. Same rule: the key stays here. */
   hasGoalKey: boolean;
+  /** True when an ATXP connection string is stored. The credential itself never leaves the main process. */
+  hasAtxpConnection: boolean;
   /** True when a custom-provider key is stored. Only meaningful beside a custom endpoint, which may also run keyless. */
   hasCustomProviderKey: boolean;
   /** Resolved path of the tunnel binary we would run, or null if we cannot find one. */

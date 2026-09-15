@@ -100,6 +100,32 @@ export const pluginCatalog: PluginCatalogEntry[] = [
     ],
   },
   {
+    id: 'n8n',
+    name: 'n8n Automation',
+    description: 'Build, inspect and run n8n workflows through your own n8n instance.',
+    icon: 'n8n',
+    color: '#ff6d5a',
+    source: { kind: 'remote' },
+    sourceUrlField: {
+      key: 'mcpUrl',
+      label: 'n8n MCP server URL',
+      required: true,
+      placeholder: 'https://your-n8n-host/mcp-server/http',
+    },
+    homepage: 'https://github.com/n8n-io/n8n',
+    license: 'n8n Sustainable Use License / Enterprise License; instance terms apply',
+    fields: [
+      { key: 'token', label: 'n8n MCP access token', secret: true, required: true, placeholder: 'Paste the token from n8n MCP Access' },
+    ],
+    tools: ['Browse workflows', 'Inspect workflow details', 'Execute workflows', 'Search executions', 'Create workflows', 'Update workflows'],
+    instructions: [
+      'Use n8n Cloud or self-host n8n from the upstream project. In n8n, open Settings → MCP Access and enable instance-level MCP access.',
+      'Paste the MCP server URL shown by n8n. Current n8n instances use an endpoint ending in /mcp-server/http.',
+      'Create or copy an n8n MCP access token and paste it below. MALACHI OVERDRIVE stores it with OS secure storage and sends it only as a Bearer token to your chosen n8n instance.',
+      'Executing n8n workflows can change external systems. Your n8n plan, workflow permissions, credentials and upstream license/terms still apply.',
+    ],
+  },
+  {
     id: 'unity',
     name: 'Unity Editor',
     description: 'Create scenes, edit GameObjects and materials, and run tests in your Unity Editor.',

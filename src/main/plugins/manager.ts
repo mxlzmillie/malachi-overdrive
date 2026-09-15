@@ -254,6 +254,8 @@ export class PluginManager {
       const catalog = pluginCatalog.find((p) => p.id === request.catalogId);
       let source = structuredClone(request.source ?? catalog?.source);
       if (!source) throw new Error('Choose an integration or installation source');
+      if (catalog?.sourceUrlField && (source.kind !== 'remote' || !source.url?.trim()))
+        throw new Error(`${catalog.sourceUrlField.label} is required`);
       if (source.auth && source.kind !== 'remote') throw new Error('OAuth requires a remote source.');
       if (source.kind === 'github') source = resolveGithub(source);
       if (source.kind === 'remote') this.remoteUrl(source.url);

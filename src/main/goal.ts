@@ -75,6 +75,7 @@ import type { GoalMode, GoalProviderKind, GoalReasoning } from '../shared/types.
 
 /** Where OpenRouter lives. One host, both routes. */
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+const ATXP_BASE = 'https://llm.atxp.ai/v1';
 
 /**
  * Sent so a key's owner can see which application spent it, which OpenRouter asks for and
@@ -95,6 +96,7 @@ export interface GoalEndpoint {
 export function goalEndpoint(): GoalEndpoint {
   const provider = getConfig().goal.provider;
   if (provider?.kind === 'custom') return { kind: 'custom', baseUrl: provider.baseUrl };
+  if (provider?.kind === 'atxp') return { kind: 'atxp', baseUrl: ATXP_BASE };
   return { kind: 'openrouter', baseUrl: OPENROUTER_BASE };
 }
 
@@ -108,6 +110,7 @@ export function goalEndpoint(): GoalEndpoint {
  */
 export function resolveGoalBaseUrl(endpoint: GoalEndpoint): string {
   if (endpoint.kind === 'openrouter') return OPENROUTER_BASE;
+  if (endpoint.kind === 'atxp') return ATXP_BASE;
   const raw = endpoint.baseUrl.trim().replace(/\/+$/, '');
   let url: URL;
   try {
@@ -125,7 +128,12 @@ export function resolveGoalBaseUrl(endpoint: GoalEndpoint): string {
 
 /** The credential for one provider kind. Custom endpoints are often keyless local servers. */
 export function goalProviderKey(kind: GoalProviderKind): Promise<string | null> {
-  return getSecret(kind === 'custom' ? 'customProviderApiKey' : 'openRouterApiKey');
+  return getSecret(kind === 'custom' ? 'customProviderApiKey' : kind === 'atxp' ? 'atxpConnection' : 'openRouterApiKey');
+}
+
+/** Hosted providers require a credential; a custom endpoint may deliberately be keyless. */
+function providerNeedsCredential(kind: GoalProviderKind): boolean {
+  return kind !== 'custom';
 }
 
 /** How many messages of history the goal model is given, newest kept. */
@@ -986,8 +994,8 @@ export async function goalKeyPresent(mode: GoalMode = goalDrivingMode()): Promis
   const endpoint = goalEndpoint();
   // A custom endpoint is often a keyless local server, so there is nothing to require:
   // reachability and auth are proven by the first call, not by the presence of a secret.
-  if (endpoint.kind === 'custom') return true;
-  return (await goalProviderKey('openrouter')) !== null;
+  if (!providerNeedsCredential(endpoint.kind)) return true;
+  return (await goalProviderKey(endpoint.kind)) !== null;
 }
 
 function view(draft: GoalDraft): GoalDraftView {
@@ -1429,7 +1437,7 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
   } catch (error) {
     return { action: 'http', error: (error as Error).message };
   }
-  const custom = request.endpoint.kind === 'custom';
+  const openrouter = request.endpoint.kind === 'openrouter';
   const body: Record<string, unknown> = {
     model: request.model,
     // Stream only to a real progress consumer. Partial text remains presentation;
@@ -1442,18 +1450,18 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
       { role: 'system', content: request.trailer }
     ],
     response_format: request.mode === 'loop' ? LOOP_RESPONSE_FORMAT : GOAL_RESPONSE_FORMAT,
-    ...(!request.publish && !custom ? { plugins: [{ id: 'response-healing' }] } : {}),
+    ...(!request.publish && openrouter ? { plugins: [{ id: 'response-healing' }] } : {}),
     // OpenRouter otherwise may route to a provider that silently ignores response_format.
     // A custom endpoint speaks plain OpenAI-compatible chat completions and must not
     // receive vendor fields it never defined.
-    ...(custom ? {} : { provider: { require_parameters: true } })
+    ...(openrouter ? { provider: { require_parameters: true } } : {})
   };
   // Reasoning may still be used, but it is never part of the response body this app parses.
   // OpenRouter documents `exclude` as supported across models even when effort selection is
   // not. `default` therefore means "provider-selected effort", not "return its scratchpad".
   // Chat Completions uses reasoning_effort; `reasoning.exclude` belongs to OpenRouter.
   // The default omits this optional field for endpoints without reasoning support.
-  if (!custom) {
+  if (openrouter) {
     body['reasoning'] = {
       ...(request.reasoning === 'default' ? {} : { effort: request.reasoning }),
       exclude: true
@@ -1469,7 +1477,7 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
     headers: {
       ...(request.key ? { authorization: `Bearer ${request.key}` } : {}),
       'content-type': 'application/json',
-      ...(custom ? {} : ATTRIBUTION_HEADERS)
+      ...(openrouter ? ATTRIBUTION_HEADERS : {})
     },
     body: JSON.stringify(body),
     signal: request.signal
@@ -1477,7 +1485,7 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
   if (!response.ok || !response.body) {
     const header = response.headers.get('retry-after');
     const delay = header === null ? NaN : /^\d+(?:\.\d+)?$/.test(header.trim()) ? Number(header) * 1000 : Date.parse(header) - Date.now();
-    return { action: 'http', error: await httpFailure(response), ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}) };
+    return { action: 'http', error: await httpFailure(response, request.endpoint.kind), ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}) };
   }
   const completion = await readGoalCompletion(response, request.publish);
   return normalizeGoalDecision(completion.text, completion.legacy);
@@ -1520,7 +1528,7 @@ async function run(draft: GoalDraft): Promise<void> {
   // keyless local server (key arrives as '' and no Authorization header is sent), and the
   // other backends never needed one. The destination and reasoning were captured with
   // the model before the reservation could yield to a settings change.
-  if (draft.backend === 'api' && !key && endpoint.kind === 'openrouter') return settle(draft, 'failed', 'no_api_key');
+  if (draft.backend === 'api' && !key && providerNeedsCredential(endpoint.kind)) return settle(draft, 'failed', 'no_api_key');
   const messages = await conversationMessages(draft.sessionId);
   if (draft.acknowledged || drafts.get(draft.conversationId) !== draft) return;
   // Goal Mode is supposed to continue *the user's objective*. A partially recovered recorder
@@ -1644,7 +1652,7 @@ export async function draftFastFollowup(sessionId: string, signal: AbortSignal =
   const endpoint = goalEndpoint();
   const key = backend === 'api' ? await goalProviderKey(endpoint.kind) : null;
   // Custom endpoints may be keyless; only OpenRouter fails here without one.
-  if (backend === 'api' && !key && endpoint.kind === 'openrouter') throw new Error('Configure the Goal API key for automatic finish follow-ups, or choose Notify me');
+  if (backend === 'api' && !key && providerNeedsCredential(endpoint.kind)) throw new Error(endpoint.kind === 'atxp' ? 'Configure the ATXP connection for automatic finish follow-ups, or choose Notify me' : 'Configure the Goal API key for automatic finish follow-ups, or choose Notify me');
   const session = await getSession(sessionId);
   if (!session?.conversationId) throw new Error('This session has no current conversation');
   const objective = goalObjectiveFor(session.conversationId);
@@ -1683,7 +1691,7 @@ export async function draftTaskPlan(prompt: string, backend: 'api' | 'chatgpt', 
   const endpoint = goalEndpoint();
   const key = backend === 'api' ? await goalProviderKey(endpoint.kind) : null;
   // Custom endpoints may be keyless; only OpenRouter fails here without one.
-  if (backend === 'api' && !key && endpoint.kind === 'openrouter') throw new Error('Configure a Goal API key or choose ChatGPT');
+  if (backend === 'api' && !key && providerNeedsCredential(endpoint.kind)) throw new Error(endpoint.kind === 'atxp' ? 'Configure the ATXP connection or choose ChatGPT' : 'Configure a Goal API key or choose ChatGPT');
   onProgress?.({ phase: 'generating', text: '' });
   const result = await requestGoalDecision({ backend, endpoint, reasoning: settings.reasoning, lifetime: 'temporary-planner', key: key ?? '', model: settings.model, mode: 'goal', publish: text => onProgress?.({ phase: 'generating', text: planProgressText(text) }),
     system: ['You are a task planner, not the executor. Produce 2 to 12 substantial workflow stages; prefer a complete implementation stage followed by a few meaningful verification passes. The executor receives the original user request and the ENTIRE workflow in its first message. Stage 1 must state the complete objective, all implementation requirements and constraints, and the end-to-end execution approach. Never restrict Stage 1 to discovery, planning, a skeleton, or a fraction of the product. If the user requests subagents, include their concrete assignments and early delegation in Stage 1 so they can work in parallel immediately. Later stages are verification and improvement checkpoints, not withheld implementation requirements: where relevant, exercise the actual app with computer use, inspect failures, repair underlying causes, rebuild or reinstall when authorized, and repeat the failed workflows. Include independent subagent code review when requested and a final check of the whole original request. Preserve the user\'s scope, authorization limits, platform, constraints and required evidence; do not invent unrelated work or claim installation/browser checks were performed. Return action continue; its reply must be a JSON string encoding {"stages":["complete implementation workflow", "verification workflow"]}. Keep the entire plan below 12000 characters. Later checkpoints are queued to the same conversation at Session finish, or after a completed turn when the user enables that delivery.'],
@@ -1716,7 +1724,7 @@ export async function draftOpeningMessage(
   if (backend === 'templates') return { reply: goal + GOAL_MARKER_INSTRUCTION, model: 'Offline Goal' };
   const key = backend === 'api' ? await goalProviderKey(endpoint.kind) : null;
   // Custom endpoints may be keyless; only OpenRouter fails here without one.
-  if (backend === 'api' && !key && endpoint.kind === 'openrouter') return { error: 'no_api_key' };
+  if (backend === 'api' && !key && providerNeedsCredential(endpoint.kind)) return { error: 'no_api_key' };
   const model = backend === 'chatgpt' ? settings.helperModel ?? 'gpt-5.6-sol' : settings.model;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
@@ -1760,7 +1768,7 @@ export async function draftOpeningMessage(
 }
 
 /** The failure in words the page can put on screen, without leaking the key back out. */
-async function httpFailure(response: Response): Promise<string> {
+async function httpFailure(response: Response, provider: GoalProviderKind = 'openrouter'): Promise<string> {
   let detail = '';
   try {
     const raw = await boundedResponseText(response, MAX_ERROR_BODY_BYTES);
@@ -1776,10 +1784,11 @@ async function httpFailure(response: Response): Promise<string> {
     // intentionally not read.
     if (error instanceof Error && error.message === 'response_body_too_large') detail = 'response body too large';
   }
-  if (response.status === 401 || response.status === 403) return `auth_rejected: ${detail || 'the OpenRouter key was refused'}`;
-  if (response.status === 402) return `out_of_credit: ${detail || 'the OpenRouter account is out of credit'}`;
-  if (response.status === 404) return `unknown_model: ${detail || 'OpenRouter does not know that model id'}`;
-  if (response.status === 429) return `rate_limited: ${detail || 'OpenRouter is rate-limiting this key'}`;
+  const label = provider === 'atxp' ? 'ATXP' : provider === 'custom' ? 'the custom provider' : 'OpenRouter';
+  if (response.status === 401 || response.status === 403) return `auth_rejected: ${detail || (provider === 'atxp' ? 'the ATXP connection was refused' : provider === 'custom' ? 'the custom provider credential was refused' : 'the OpenRouter key was refused')}`;
+  if (response.status === 402) return `out_of_credit: ${detail || `${label} account is out of credit`}`;
+  if (response.status === 404) return `unknown_model: ${detail || `${label} does not know that model id`}`;
+  if (response.status === 429) return `rate_limited: ${detail || (provider === 'atxp' ? 'ATXP is rate-limiting this connection' : provider === 'custom' ? 'the custom provider is rate-limiting this request' : 'OpenRouter is rate-limiting this key')}`;
   return `http_${response.status}${detail ? `: ${detail}` : ''}`;
 }
 
@@ -2478,17 +2487,19 @@ export async function listGoalModels(offset = 0, limit = MODEL_PAGE_SIZE): Promi
 async function allGoalModels(): Promise<GoalModel[]> {
   const endpoint = goalEndpoint();
   const custom = endpoint.kind === 'custom';
+  const openrouter = endpoint.kind === 'openrouter';
+  const atxp = endpoint.kind === 'atxp';
   const key = await goalProviderKey(endpoint.kind);
+  if (providerNeedsCredential(endpoint.kind) && !key) throw new Error(endpoint.kind === 'atxp' ? 'ATXP connection string required' : 'OpenRouter API key required');
   // OpenRouter may return a key-restricted catalogue. A cache filled under key A is therefore
   // not valid under key B. Keep only a one-way fingerprint beside the models rather than the
   // credential itself; replacing a key immediately changes the cache scope without retaining
   // either secret for the five-minute listing TTL. A custom endpoint joins the scope by URL,
   // so switching servers never serves the previous server's catalogue.
+  const credentialScope = key ? createHash('sha256').update(key).digest('hex') : 'public';
   const keyScope = custom
-    ? `custom:${endpoint.baseUrl.trim()}:${key ? createHash('sha256').update(key).digest('hex') : 'public'}`
-    : key
-      ? createHash('sha256').update(key).digest('hex')
-      : 'public';
+    ? `custom:${endpoint.baseUrl.trim()}:${credentialScope}`
+    : `${endpoint.kind}:${credentialScope}`;
   if (modelCache && modelCache.keyScope === keyScope && Date.now() - modelCache.at < MODEL_CACHE_MS) {
     return modelCache.models;
   }
@@ -2500,7 +2511,7 @@ async function allGoalModels(): Promise<GoalModel[]> {
   // vanilla OpenAI shape, some answer nothing at all, and either way the model stays a
   // hand-typed field. A failure here returns an empty list rather than an error, while the
   // OpenRouter catalogue keeps its throwing behaviour so a broken default stays visible.
-  const label = custom ? 'custom provider' : 'OpenRouter';
+  const label = custom ? 'custom provider' : atxp ? 'ATXP' : 'OpenRouter';
   try {
     const baseUrl = resolveGoalBaseUrl(endpoint);
     response = await fetch(`${baseUrl}/models`, {
@@ -2509,7 +2520,7 @@ async function allGoalModels(): Promise<GoalModel[]> {
         // The listing is public; the key is sent when there is one so a key with a restricted
         // model set sees its own set rather than the catalogue.
         ...(key ? { authorization: `Bearer ${key}` } : {}),
-        ...(custom ? {} : ATTRIBUTION_HEADERS)
+        ...(openrouter ? ATTRIBUTION_HEADERS : {})
       },
       signal: abort.signal
     });
@@ -2525,9 +2536,9 @@ async function allGoalModels(): Promise<GoalModel[]> {
       clearTimeout(timer);
       return [];
     }
-    if (abort.signal.aborted) throw new Error('OpenRouter model list request timed out');
+    if (abort.signal.aborted) throw new Error(`${label} model list request timed out`);
     if (error instanceof Error && error.message === 'response_body_too_large') {
-      throw new Error('OpenRouter model list response body was too large');
+      throw new Error(`${label} model list response body was too large`);
     }
     throw error;
   } finally {
@@ -2536,16 +2547,22 @@ async function allGoalModels(): Promise<GoalModel[]> {
   const raw = parsed && typeof parsed === 'object' ? (parsed as { data?: unknown }).data : null;
   if (!Array.isArray(raw)) {
     if (custom) return [];
-    throw new Error('OpenRouter returned a model list this app could not read');
+    throw new Error(`${label} returned a model list this app could not read`);
   }
   const models: GoalModel[] = [];
+  const seen = new Set<string>();
   for (const entry of raw) {
     if (models.length >= MAX_MODELS) break;
     if (!entry || typeof entry !== 'object') continue;
     const model = entry as { id?: unknown; name?: unknown; created?: unknown; context_length?: unknown };
     if (typeof model.id !== 'string' || model.id === '' || model.id.length > MAX_MODEL_FIELD_CHARS) continue;
+    // ATXP lists provider-qualified ids (for example openai/gpt-4.1) but its
+    // OpenAI-compatible request API expects the model name without that company prefix.
+    const id = atxp && model.id.includes('/') ? model.id.slice(model.id.indexOf('/') + 1) : model.id;
+    if (!id || id.length > MAX_MODEL_FIELD_CHARS || seen.has(id)) continue;
+    seen.add(id);
     models.push({
-      id: model.id,
+      id,
       name:
         typeof model.name === 'string' && model.name
           ? model.name.slice(0, MAX_MODEL_FIELD_CHARS)

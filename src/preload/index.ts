@@ -114,8 +114,9 @@ const api = {
   removeRoot: (name: string) => call<AppState>('roots:remove', { name }),
   renameRoot: (name: string, newName: string) => call<AppState>('roots:rename', { name, newName }),
   setApiKey: (value: string) => call<AppState>('secret:set', { value }),
-  // The goal loop's own credential. Same channel, named slot; the value only ever goes in.
+  // The goal loop's own credentials. Same channel, named slots; values only ever go in.
   setGoalKey: (value: string) => call<AppState>('secret:set', { value, key: 'openRouterApiKey' }),
+  setAtxpConnection: (value: string) => call<AppState>('secret:set', { value, key: 'atxpConnection' }),
   // The same, for a custom provider endpoint. Optional: keyless local servers need nothing stored.
   setCustomProviderKey: (value: string) => call<AppState>('secret:set', { value, key: 'customProviderApiKey' }),
   listGoalModels: (offset: number) => call<GoalModelPage>('goal:models', { offset }),

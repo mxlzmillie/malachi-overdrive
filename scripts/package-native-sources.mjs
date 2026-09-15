@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { downloadWithRetry } from './fetch-with-retry.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const noticeDirectory = path.join(root, 'docs', 'licenses', 'native');
@@ -46,16 +47,9 @@ await Promise.all(Array.from({ length: 8 }, async () => {
     try { bytes = await fs.readFile(destination); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (!bytes) {
-      const response = await fetch(source.url, { signal: AbortSignal.timeout(180_000) });
-      if (!response.ok) throw new Error(`Native source download failed: ${source.file}: HTTP ${response.status}`);
-      const chunks = [];
-      let size = 0;
-      for await (const chunk of response.body) {
-        size += chunk.length;
-        if (size > source.bytes) throw new Error(`Native source exceeds reviewed size: ${source.file}`);
-        chunks.push(chunk);
-      }
-      bytes = Buffer.concat(chunks);
+      const timeoutMs = Math.min(600_000, Math.max(180_000, Math.ceil(source.bytes / (512 * 1024)) * 1_000 + 60_000));
+      try { bytes = await downloadWithRetry(source.url, { maxBytes: source.bytes, timeoutMs }); }
+      catch (error) { throw new Error(`Native source download failed: ${source.file}: ${error instanceof Error ? error.message : String(error)}`); }
     }
     if (bytes.length !== source.bytes || createHash('sha256').update(bytes).digest('hex') !== source.sha256) {
       throw new Error(`Native source checksum mismatch: ${source.file}`);

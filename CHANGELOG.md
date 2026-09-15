@@ -11,6 +11,15 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.17] — 2026-09-15
+
+- Carries forward the five reviewed GitHub tool-library entries from 2.0.16: free-for.dev, Public APIs, EasySpider, Awesome MCP Servers, and Strix.
+- Hardened native-source release packaging against transient CDN/network failures with bounded retries and deterministic backoff while preserving exact reviewed size and SHA-256 verification.
+- Retries observed temporary HTTP classes such as 406/408/425/429 and 5xx responses plus transport failures, while permanent client errors still fail immediately.
+- Added focused regressions for retry recovery, permanent-error refusal, and retry bounds.
+
+See [the full release notes](docs/release-notes/v2.0.17.md).
+
 ## [2.0.16] — 2026-09-15
 
 - Added a built-in GitHub tool library to the Plugins screen with reviewed entries for free-for.dev, Public APIs, EasySpider, Awesome MCP Servers, and Strix.

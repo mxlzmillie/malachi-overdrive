@@ -17,13 +17,12 @@
  * looks for the resource seal it implies, finds none, and calls the bundle damaged. There was
  * never an x64-only version of this problem, which is why it appeared with Apple Silicon.
  *
- * ## Why ad-hoc rather than Developer ID
+ * ## Why local builds still use ad-hoc signing
  *
- * The release policy is deliberately unsigned and unnotarized, and this does not change that.
- * An ad-hoc seal carries no Authority and no TeamIdentifier — `codesign -dvv` still reports
- * `Signature=adhoc`, and Gatekeeper still will not vouch for it. What it adds is the resource
- * envelope the executable's own signature already claims exists. The bundle stops contradicting
- * itself; it does not become trusted. Users still clear quarantine as before.
+ * Contributors need to be able to package without owning Malachi's Developer ID certificate.
+ * An ad-hoc seal carries no Authority and no TeamIdentifier — `codesign -dvv` reports
+ * `Signature=adhoc`. Public releases set COS_REQUIRE_MACOS_SIGNING=1, skip this hook, and are
+ * signed/notarized by electron-builder with the release credentials instead.
  *
  * ## Why it verifies afterwards
  *
@@ -35,6 +34,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { assertNoTrustBearingMacCodeSignature } from './macos-audit-utils.mjs';
+import { macOSReleaseSigningRequired } from './macos-signing-policy.mjs';
 
 /** Runs a command and returns its combined output, throwing with that output on failure. */
 function run(command, args) {
@@ -48,6 +48,14 @@ function run(command, args) {
 
 export default async function sealMacOsBundle(context) {
   if (context.electronPlatformName !== 'darwin') return;
+
+  // afterPack runs before electron-builder's normal macOS signing stage. Public releases must be
+  // signed with Developer ID later in that stage, so do not manufacture an ad-hoc identity first.
+  // Local/dev packages intentionally keep the coherent ad-hoc seal below.
+  if (macOSReleaseSigningRequired(process.env)) {
+    process.stdout.write('Developer ID release signing required; skipping the local ad-hoc afterPack seal.\n');
+    return;
+  }
 
   const appName = `${context.packager.appInfo.productFilename}.app`;
   const app = path.join(context.appOutDir, appName);
@@ -65,9 +73,8 @@ export default async function sealMacOsBundle(context) {
   run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
 
   const shown = run('codesign', ['--display', '--verbose=4', app]);
-  // Fail loudly if this ever starts producing a trust-bearing signature. The release notes say
-  // unsigned, and an afterPack hook silently turning that into something Gatekeeper vouches for
-  // would be a policy change smuggled in as a build step.
+  // Fail loudly if the local/dev path ever starts producing a trust-bearing signature. Public
+  // release signing is owned by electron-builder after this hook, never by the ad-hoc fallback.
   // codesign displays these details on stderr even on success. Use the same
   // stdout+stderr policy as the standalone bundle audit, including TeamIdentifier.
   assertNoTrustBearingMacCodeSignature(app, shown, existsSync(path.join(app, 'Contents', '_CodeSignature', 'CodeResources')));

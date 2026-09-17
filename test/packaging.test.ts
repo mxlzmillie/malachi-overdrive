@@ -14,13 +14,17 @@ import { assertReleaseAbsent } from '../scripts/check-release-absent.mjs';
 import { assertCurrentTunnelRelease } from '../scripts/verify-current-tunnel.mjs';
 // @ts-ignore Build scripts are intentionally plain ESM JavaScript.
 import * as macOSAuditUtils from '../scripts/macos-audit-utils.mjs';
+// @ts-ignore Build scripts are intentionally plain ESM JavaScript.
+import * as macOSSigningPolicy from '../scripts/macos-signing-policy.mjs';
 const { RIPGREP, TUNNEL_CLIENT } = packagingVersions;
 const {
   assertCompatibleMacOSDeploymentTargets,
+  assertDeveloperIdMacCodeSignature,
   assertNoTrustBearingMacCodeSignature,
   macOSDeploymentTargetsFromOtool,
   withOtoolSafePath
 } = macOSAuditUtils;
+const { assertMacOSReleaseSigningEnvironment, macOSReleaseSigningRequired } = macOSSigningPolicy;
 const {
   normalizeArch,
   normalizePlatform,
@@ -201,9 +205,15 @@ describe('cross-platform packaging targets', () => {
     expect(workflow).toContain('Execute generated static-runtime AppImage');
     expect(workflow).toContain('Verify generated macOS archives');
     expect(workflow).toContain('hdiutil verify "$dmg"');
-    expect(workflow).toContain('codesign --display --verbose=4 "$dmg" >dmg-codesign.log 2>&1');
-    expect(workflow).toContain('dmg_codesign_status=$?');
-    expect(workflow).toContain("grep -Eqi 'code object is not signed( at all)?' dmg-codesign.log");
+    expect(workflow).toContain("COS_REQUIRE_MACOS_SIGNING: ${{ matrix.platform == 'darwin' && inputs.require_macos_signing && '1' || '0' }}");
+    expect(workflow).toContain('CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}');
+    expect(workflow).toContain('MACOS_APPLE_API_KEY_CONTENT: ${{ secrets.MACOS_APPLE_API_KEY }}');
+    expect(workflow).toContain('APPLE_API_KEY_ID: ${{ secrets.MACOS_APPLE_API_KEY_ID }}');
+    expect(workflow).toContain('APPLE_API_ISSUER: ${{ secrets.MACOS_APPLE_API_ISSUER }}');
+    expect(workflow).toContain('name: Materialize App Store Connect notarization key');
+    expect(workflow).toContain('printf \'%s\' "$MACOS_APPLE_API_KEY_CONTENT" > "$key_path"');
+    expect(workflow).toContain('echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"');
+    expect(workflow).not.toContain('macOS DMG unexpectedly has a code signature');
     expect(workflow).toContain('test -L "$mount_dir/Applications"');
     expect(workflow).toContain('test "$(readlink "$mount_dir/Applications")" = /Applications');
     expect(workflow).toContain('ditto -x -k "$zip" "$zip_dir"');
@@ -426,9 +436,10 @@ describe('cross-platform packaging targets', () => {
     expect(source).toContain('exec "$BIN" "\\${NO_SANDBOX[@]}" "\\${args[@]}"');
   });
 
-  it('pins the current macOS release to unsigned thin native bundles with explicit metadata checks', () => {
+  it('keeps local macOS packaging ad-hoc while release mode requires Developer ID signing', () => {
     const builder = yamlFile('electron-builder.yml');
     const macSmoke = readFileSync(path.join(root, 'scripts', 'smoke-macos-bundle.mjs'), 'utf8');
+    const packageScript = readFileSync(path.join(root, 'scripts', 'package.mjs'), 'utf8');
     expect(builder.mac.identity).toBeNull();
     expect(builder.mac.notarize).toBe(false);
     expect(builder.mac.category).toBe('public.app-category.developer-tools');
@@ -465,9 +476,13 @@ describe('cross-platform packaging targets', () => {
       "run('plutil', ['-extract', key, 'raw', plist])",
       "run('codesign', ['--display', '--verbose=4', app]",
       "run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', app])",
+      'assertDeveloperIdMacCodeSignature(',
       'assertNoTrustBearingMacCodeSignature(',
       "path.join(contents, '_CodeSignature', 'CodeResources')"
     ]) expect(macSmoke).toContain(marker);
+    expect(packageScript).toContain("'--config.forceCodeSigning=true'");
+    expect(packageScript).toContain("'--config.mac.identity=Developer ID Application'");
+    expect(packageScript).toContain("'--config.mac.notarize=true'");
     expect(macSmoke).toContain("requireFile(path.join(resources, 'icon.icns'))");
     expect(macSmoke).toContain("iconBytes.toString('ascii', 0, 4) !== 'icns'");
     const packagedRuntime = readFileSync(path.join(root, 'scripts', 'smoke-packaged-runtime.mjs'), 'utf8');
@@ -574,6 +589,56 @@ Load command 11
     }, true)).toThrow(/inspection failed unexpectedly/);
   });
 
+  it('requires the expected Developer ID team for public macOS bundles', () => {
+    const developerId = {
+      status: 0,
+      stdout: '',
+      stderr:
+        'Identifier=com.chatonsteroids.app\n' +
+        'Authority=Developer ID Application: Malachi (TEAM123456)\n' +
+        'TeamIdentifier=TEAM123456\n'
+    };
+    expect(() => assertDeveloperIdMacCodeSignature('release.app', developerId, 'TEAM123456', true)).not.toThrow();
+    expect(() => assertDeveloperIdMacCodeSignature('wrong-team.app', developerId, 'OTHERTEAM12', true)).toThrow(
+      /TeamIdentifier TEAM123456, expected OTHERTEAM12/
+    );
+    expect(() => assertDeveloperIdMacCodeSignature('adhoc.app', {
+      status: 0,
+      stdout: '',
+      stderr: 'Identifier=com.chatonsteroids.app\nSignature=adhoc\nTeamIdentifier=not set\n'
+    }, 'TEAM123456', true)).toThrow(/does not have a trust-bearing Developer ID Application signature/);
+    expect(() => assertDeveloperIdMacCodeSignature('unsealed.app', developerId, 'TEAM123456', false)).toThrow(
+      /no bundle CodeResources envelope/
+    );
+  });
+
+  it('fails closed when public macOS release credentials are incomplete', () => {
+    expect(macOSReleaseSigningRequired({ COS_REQUIRE_MACOS_SIGNING: '1' })).toBe(true);
+    expect(macOSReleaseSigningRequired({ COS_REQUIRE_MACOS_SIGNING: '0' })).toBe(false);
+    expect(assertMacOSReleaseSigningEnvironment({ COS_REQUIRE_MACOS_SIGNING: '0' })).toBeNull();
+
+    const complete = {
+      COS_REQUIRE_MACOS_SIGNING: '1',
+      CSC_LINK: 'certificate',
+      CSC_KEY_PASSWORD: 'password',
+      APPLE_API_KEY: '/tmp/AuthKey_TEST.p8',
+      APPLE_API_KEY_ID: 'KEY1234567',
+      APPLE_API_ISSUER: '00000000-0000-0000-0000-000000000000'
+    };
+    expect(assertMacOSReleaseSigningEnvironment(complete)).toEqual({ mode: 'api-key', teamId: null });
+    expect(() => assertMacOSReleaseSigningEnvironment({ ...complete, CSC_LINK: '' })).toThrow(
+      /CSC_LINK.*CSC_KEY_PASSWORD.*CSC_NAME.*must not fall back to ad-hoc signing/
+    );
+    expect(() => assertMacOSReleaseSigningEnvironment({ ...complete, APPLE_API_ISSUER: '' })).toThrow(
+      /APPLE_API_ISSUER.*App Store Connect API-key triplet/
+    );
+    expect(assertMacOSReleaseSigningEnvironment({
+      COS_REQUIRE_MACOS_SIGNING: '1',
+      CSC_NAME: 'Developer ID Application: Example (TEAM123456)',
+      APPLE_KEYCHAIN_PROFILE: 'MALACHI_OVERDRIVE'
+    })).toEqual({ mode: 'keychain-profile', teamId: null });
+  });
+
   /**
    * Issue #66: the shape that shipped twice and would not launch.
    *
@@ -631,8 +696,10 @@ Load command 11
     expect(workflow.slice(preflight, candidate)).toContain('npm run verify:tunnel-current');
     expect(workflow.slice(preflight, candidate)).toContain('Verify release metadata agrees');
     expect(workflow.slice(preflight, candidate)).toContain("APP_VERSION = '([^']+)'");
-    expect(workflow.slice(preflight, candidate)).toContain('must disclose unsigned and unnotarized macOS artifacts');
+    expect(workflow.slice(preflight, candidate)).toContain('must document Developer ID signing and macOS notarization');
     expect(workflow.slice(candidate, publish)).toContain('needs: preflight');
+    expect(workflow.slice(candidate, publish)).toContain('require_macos_signing: true');
+    expect(workflow.slice(candidate, publish)).toContain('secrets: inherit');
     expect(workflow.slice(publish)).toContain('node scripts/check-release-absent.mjs');
     expect(workflow.slice(publish).match(/npm run verify:tunnel-current/g)).toHaveLength(1);
     expect(workflow).toContain('name: chat-on-steroids-candidate-${{ github.run_id }}');
@@ -655,8 +722,8 @@ Load command 11
     expect(versionSource.match(/APP_VERSION = '([^']+)'/)?.[1]).toBe(pkg.version);
     expect(changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m)?.[1]).toBe(pkg.version);
     expect(notes).toContain(`## ${pkg.version}`);
-    expect(notes).toMatch(/unsigned/i);
-    expect(notes).toMatch(/unnotarized/i);
+    expect(notes).toMatch(/Developer ID/i);
+    expect(notes).toMatch(/notariz/i);
 
     const artifacts = [
       'MALACHI-OVERDRIVE-Setup-x64.exe',

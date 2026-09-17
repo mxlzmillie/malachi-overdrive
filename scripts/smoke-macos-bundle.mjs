@@ -3,9 +3,11 @@ import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node
 import path from 'node:path';
 import {
   assertCompatibleMacOSDeploymentTargets,
+  assertDeveloperIdMacCodeSignature,
   assertNoTrustBearingMacCodeSignature,
   withOtoolSafePath
 } from './macos-audit-utils.mjs';
+import { macOSReleaseSigningRequired } from './macos-signing-policy.mjs';
 
 if (process.platform !== 'darwin') {
   throw new Error(`smoke-macos-bundle.mjs must run on macOS, got ${process.platform}`);
@@ -169,15 +171,19 @@ if (launchedMachOCount < 6) {
 // The afterPack hook creates the seal and runs the real --verify --deep --strict against the app
 // it just sealed, where a failure can still stop the build before an artifact exists.
 const signature = run('codesign', ['--display', '--verbose=4', app], { allowFailure: true });
-assertNoTrustBearingMacCodeSignature(
-  app,
-  signature,
-  existsSync(path.join(contents, '_CodeSignature', 'CodeResources'))
-);
+const hasCodeResources = existsSync(path.join(contents, '_CodeSignature', 'CodeResources'));
+if (macOSReleaseSigningRequired(process.env)) {
+  const expectedTeamId = String(process.env.APPLE_TEAM_ID ?? '').trim();
+  if (!expectedTeamId) throw new Error('APPLE_TEAM_ID is required while auditing a signed macOS release');
+  assertDeveloperIdMacCodeSignature(app, signature, expectedTeamId, hasCodeResources);
+} else {
+  assertNoTrustBearingMacCodeSignature(app, signature, hasCodeResources);
+}
 // Check the copied payload too: a valid source seal does not prove that DMG/ZIP
 // construction preserved every sealed resource and nested executable.
 run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
 
+const signingPolicy = macOSReleaseSigningRequired(process.env) ? 'Developer ID release identity' : 'local ad-hoc policy';
 process.stdout.write(
-  `macOS ${arch} bundle metadata/icon, ${launchedMachOCount} launchable executable modes, ${machOCount} thin Mach-O payloads, deployment floors and unsigned policy verified.\n`
+  `macOS ${arch} bundle metadata/icon, ${launchedMachOCount} launchable executable modes, ${machOCount} thin Mach-O payloads, deployment floors and ${signingPolicy} verified.\n`
 );

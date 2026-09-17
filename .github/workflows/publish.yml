@@ -71,8 +71,8 @@ jobs:
           if (!fs.existsSync(notesPath)) throw new Error(`Missing ${notesPath}`);
           const notes = fs.readFileSync(notesPath, 'utf8');
           if (!notes.includes(`## ${pkg.version}`)) throw new Error(`${notesPath} has no matching version heading`);
-          if (!/unsigned/i.test(notes) || !/unnotarized/i.test(notes)) {
-            throw new Error(`${notesPath} must disclose unsigned and unnotarized macOS artifacts`);
+          if (!/Developer ID/i.test(notes) || !/notariz/i.test(notes)) {
+            throw new Error(`${notesPath} must document Developer ID signing and macOS notarization`);
           }
           for (const artifact of [
             'MALACHI-OVERDRIVE-Setup-x64.exe',
@@ -117,6 +117,9 @@ jobs:
     name: Build candidate
     needs: preflight
     uses: ./.github/workflows/release.yml
+    with:
+      require_macos_signing: true
+    secrets: inherit
 
   publish:
     name: Publish

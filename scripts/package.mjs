@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeArch, normalizePlatform, PLATFORM_INFO } from './packaging-targets.mjs';
+import { assertMacOSReleaseSigningEnvironment, macOSReleaseSigningRequired } from './macos-signing-policy.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -16,6 +17,8 @@ function value(name, fallback) {
 const platform = normalizePlatform(value('platform', process.platform));
 const arches = value('arch', process.arch).split(',').map((item) => normalizeArch(item.trim()));
 const dirOnly = args.includes('--dir');
+
+if (platform === 'darwin') assertMacOSReleaseSigningEnvironment(process.env);
 
 function run(command, commandArgs, env = process.env) {
   const result = spawnSync(command, commandArgs, { cwd: root, stdio: 'inherit', env });
@@ -42,6 +45,16 @@ for (const arch of arches) {
     '--publish',
     'never'
   ];
+  if (platform === 'darwin' && macOSReleaseSigningRequired(process.env)) {
+    // electron-builder imports CSC_LINK into a temporary keychain, resolves this Developer ID
+    // identity, then notarizes with the APPLE_* credentials. The forceCodeSigning gate prevents
+    // an expired/missing certificate from silently producing an ad-hoc public artifact.
+    builderArgs.push(
+      '--config.forceCodeSigning=true',
+      '--config.mac.identity=Developer ID Application',
+      '--config.mac.notarize=true'
+    );
+  }
   if (dirOnly) builderArgs.push('--dir');
   run(node, builderArgs, { ...process.env, COS_PACKAGE_ARCH: arch });
 }

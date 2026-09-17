@@ -203,6 +203,24 @@ it('groups provider family lanes and selects Pro through the same family instead
   // Existing stored family display slugs retain their requested Pro effort too.
   expect(await f.api.selectModelSettings('gpt-5.6-sol', 'pro')).toBe(true);
 });
+it('accepts an account-observed family alias only for its exact live lane and effort', async () => {
+  const f = fixture();
+  const version = f.props.modelsData.versions[0]!;
+  version.id = '5.6'; version.displayTextForIntelligence = 'GPT-5.6 Sol';
+  for (const selection of f.selections[0]!) (selection.category as any).modelVersion = '5.6';
+
+  // Model discovery publishes gpt-5-6-thinking as an alias of family 5.6. A worker may
+  // therefore carry the shorter persisted family alias `gpt-5-6`; bootstrap must resolve it
+  // back to the exact live Thinking lane rather than failing after admission.
+  expect(await f.api.selectModelSettings('gpt-5-6', 'high', () => true, true)).toBe(true);
+  expect(f.state.currentSelection).toMatchObject({ modelSlug: 'gpt-5-6-thinking', thinkingEffort: 'extended' });
+  expect(f.api.modelSettingsMatch('gpt-5-6', 'high')).toBe(true);
+
+  // The alias does not widen the effort. Pro is unavailable in this fixture, so the same
+  // family spelling may not silently choose another lane.
+  f.api.closeModelSettings();
+  expect(await f.api.selectModelSettings('gpt-5-6', 'pro')).toBe(false);
+});
 it('reads an already-open version submenu and restores its original exact power', async () => {
   const f = fixture();
   page.window.document.querySelector('button')!.dispatchEvent(new page.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));

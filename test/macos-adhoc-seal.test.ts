@@ -7,9 +7,15 @@ import seal from '../scripts/afterpack-macos-adhoc-seal.mjs';
 const context = { electronPlatformName: 'darwin', appOutDir: '/package', packager: { appInfo: { productFilename: 'MALACHI OVERDRIVE' } } };
 beforeEach(() => {
   vi.resetAllMocks();
+  delete process.env.COS_REQUIRE_MACOS_SIGNING;
   ports.exists.mockReturnValue(true);
   ports.spawn.mockImplementation((_command: string, args: string[]) => ({ status: 0, stdout: '',
     stderr: args.includes('--display') ? 'Identifier=com.chatonsteroids.app\nSignature=adhoc\nTeamIdentifier=not set\n' : '' }));
+});
+it('leaves public release signing to electron-builder instead of creating an ad-hoc identity', async () => {
+  process.env.COS_REQUIRE_MACOS_SIGNING = '1';
+  await expect(seal(context)).resolves.toBeUndefined();
+  expect(ports.spawn).not.toHaveBeenCalled();
 });
 it.each(['win32', 'linux'])('does not run macOS signing on %s', async platform => {
   await seal({ ...context, electronPlatformName: platform });

@@ -11,6 +11,21 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.19] — 2026-09-17
+
+- Fixed worker model bootstrap when ChatGPT exposes a short model family id such as `5.6` but the
+  saved/account-observed alias is `gpt-5-6`: the browser now resolves that alias back to the exact
+  live execution lane while still requiring the requested reasoning effort and refusing fallback.
+- Preserved fail-closed worker admission: GPT-6 Pro/Astra is still rejected when the current
+  ChatGPT account picker does not expose it; MALACHI OVERDRIVE does not silently substitute Sol.
+- Public macOS release packaging now requires a real Developer ID Application signature and Apple
+  notarization instead of publishing ad-hoc/unnotarized artifacts. Local developer packages retain
+  the existing coherent ad-hoc path.
+- Added App Store Connect API-key notarization support to release CI so the notarization credential
+  path matches the one validated against Apple's notary service during this release cycle.
+
+See [the full release notes](docs/release-notes/v2.0.19.md).
+
 ## [2.0.18] — 2026-09-17
 
 - Provider-compliance audit: Goal/Loop now treats explicit HTTP 429 provider rate limits as a

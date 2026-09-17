@@ -1825,6 +1825,25 @@ var CLF_DOM = (() => {
   }
 
   const normalizeModelLabel = value => String(value || '').toLowerCase().replace(/[^a-z0-9.]/g, '');
+  /**
+   * ChatGPT may expose one family as a short family id plus execution-lane slugs, e.g.
+   * family `5.6` with lane `gpt-5-6-thinking`. The account catalogue deliberately records
+   * those exact lane slugs as aliases of the observed family, so a caller may legitimately
+   * persist either spelling. Keep the browser half equally strict: an alias matches only an
+   * exact live lane slug, or the narrow family prefix obtained by removing one provider-owned
+   * execution suffix. Effort is checked separately by every caller, so this never turns a
+   * Thinking alias into permission to select Pro (or vice versa), and arbitrary prefix matches
+   * remain refused.
+   */
+  function requestedModelMatchesLiveSelection(requested, model, family) {
+    const wanted = String(requested || '').trim().toLowerCase();
+    if (!wanted) return true;
+    const exact = [model, family].map(value => String(value || '').trim().toLowerCase());
+    if (exact.includes(wanted)) return true;
+    const laneFamily = value => value.replace(/-(?:thinking|instant|pro)$/, '');
+    return exact.some(value => value && laneFamily(value) === wanted) ||
+      exact.some(value => normalizeModelLabel(value) === normalizeModelLabel(wanted));
+  }
   /** One bounded read through the existing MAIN-world helper; no provider API or setters. */
   function readPickerState() {
     return new Promise(resolve => {
@@ -1958,10 +1977,7 @@ var CLF_DOM = (() => {
     const selected = visibleModelSelection();
     if (!selected || (effort && selected.reasoningEffort !== effort)) return false;
     if (!model) return true;
-    const requested = String(model).trim();
-    return selected.model === requested || selected.family === requested ||
-      normalizeModelLabel(selected.model) === normalizeModelLabel(requested) ||
-      normalizeModelLabel(selected.family) === normalizeModelLabel(requested);
+    return requestedModelMatchesLiveSelection(model, selected.model, selected.family);
   }
   function closeModelSettings() { modelPickerAccess(() => true).close(); }
   /** Account model discovery belongs to Chat; Work mounts a different picker.
@@ -2039,7 +2055,10 @@ var CLF_DOM = (() => {
     try {
       // Exact provider slug is preferred. Existing saved display slugs may resolve
       // only to an actually observed, available pair; never to an account default.
-      const matches = c => c.available && (!effort || c.effort === effort) && (!model || c.familyId === model || c.id === model || normalizeModelLabel(c.familyLabel) === normalizeModelLabel(model) || normalizeModelLabel(c.label) === normalizeModelLabel(model));
+      const matches = c => c.available && (!effort || c.effort === effort) &&
+        (!model || requestedModelMatchesLiveSelection(model, c.id, c.familyId) ||
+          normalizeModelLabel(c.familyLabel) === normalizeModelLabel(model) ||
+          normalizeModelLabel(c.label) === normalizeModelLabel(model));
       for (const version of [original.versions.find(v => v.id === original.version), ...original.versions.filter(v => v.id !== original.version)]) {
         const state = await ui.version(version.id); if (!state) return false;
         const choices = state.choices.filter(matches);

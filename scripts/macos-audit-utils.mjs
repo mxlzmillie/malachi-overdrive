@@ -128,3 +128,22 @@ export function assertNoTrustBearingMacCodeSignature(file, codesignResult, hasCo
     throw new Error(`${file} unexpectedly has a trust-bearing code signature; release metadata says unsigned`);
   }
 }
+
+/** Require the stable Developer ID identity used by public macOS releases. */
+export function assertDeveloperIdMacCodeSignature(file, codesignResult, expectedTeamId, hasCodeResources = false) {
+  if (!hasCodeResources) throw new Error(`${file} has no bundle CodeResources envelope`);
+  if (codesignResult.status !== 0) {
+    throw new Error(`${file} Developer ID code-signature inspection failed (status ${codesignResult.status ?? 'null'})`);
+  }
+
+  const output = `${codesignResult.stdout ?? ''}\n${codesignResult.stderr ?? ''}`;
+  const authority = output.match(/^Authority=Developer ID Application:\s*(.+)$/m)?.[1]?.trim();
+  const teamId = output.match(/^TeamIdentifier=(.+)$/m)?.[1]?.trim();
+  if (!authority || !teamId || teamId === 'not set' || /^Signature=adhoc\s*$/m.test(output)) {
+    throw new Error(`${file} does not have a trust-bearing Developer ID Application signature`);
+  }
+  if (expectedTeamId && teamId !== expectedTeamId) {
+    throw new Error(`${file} is signed by TeamIdentifier ${teamId}, expected ${expectedTeamId}`);
+  }
+  return { authority, teamId };
+}

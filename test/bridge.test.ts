@@ -43,6 +43,7 @@ const { safeStorage } = await import('electron');
 const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSecretsPath, resetSecretsCacheForTests, setSecret } = await import('../src/main/secrets.js');
 const {
+  bridgePairingCode,
   bridgePort,
   bridgeStatus,
   onBridgeChange,
@@ -213,10 +214,13 @@ interface Reply {
 function request(
   method: string,
   path: string,
-  options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; extensionVersion?: string; protocol?: number } = {}
+  options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; extensionVersion?: string; protocol?: number; pairingCode?: boolean } = {}
 ): Promise<Reply> {
   const url = new URL(path, base);
-  const payload = options.raw ?? (options.body === undefined ? null : JSON.stringify(options.body));
+  const pairedBody = path === '/pair' && options.pairingCode !== false
+    ? { ...(options.body && typeof options.body === 'object' ? options.body : {}), code: bridgePairingCode() }
+    : options.body;
+  const payload = options.raw ?? (pairedBody === undefined ? null : JSON.stringify(pairedBody));
   const headers: Record<string, string> = {};
   // Every extension request carries its protocol generation. Pairing must fail closed
   // across incompatible app/extension builds instead of provisioning a token that can
@@ -440,12 +444,19 @@ describe('who is allowed to talk to it', () => {
 // -------------------------------------------------------------- provisioning
 
 describe('provisioning', () => {
-  it('issues a token to the extension with nothing for the user to type', async () => {
+  it('issues a token only with the app-window pairing code', async () => {
+    const refused = await request('POST', '/pair', { auth: null, pairingCode: false });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('pairing_code_required');
+    expect(refused.body.token).toBeUndefined();
     const reply = await request('POST', '/pair', { auth: null });
     expect(reply.status).toBe(200);
     expect(reply.body.token).toMatch(/^[A-Za-z0-9_-]{32,}$/);
     const hello = await request('GET', '/hello', { auth: null });
     expect(hello.body.paired).toBe(true);
+    const replay = await request('POST', '/pair', { auth: null, body: { code: '000000-000000' }, pairingCode: false });
+    expect(replay.status).toBe(403);
+    expect((await request('GET', '/status', { auth: reply.body.token })).status).toBe(200);
   });
 
   it('starts and stays usable while secure storage is unavailable, then pairs after it returns', async () => {
@@ -506,7 +517,7 @@ describe('provisioning', () => {
     // disconnect marker from the encrypted file, the relevant half of an app restart.
     resetSecretsCacheForTests();
 
-    // First-install provisioning is silent, but this browser was deliberately revoked by
+    // Pairing is user-mediated, and this browser was deliberately revoked by
     // the app. A background poll must not be able to turn that revocation into a new token.
     const silent = await request('POST', '/pair', { auth: null });
     expect(silent.status).toBe(409);
@@ -7759,7 +7770,7 @@ describe('the goal loop over the bridge', () => {
       expect(started.status).toBe(200);
       await vi.waitFor(async () => {
         const draft = (await request('GET', `/activity?conversationId=${chat}&goalClient=page-before-reload`)).body.goal.draft;
-        expect(draft).toMatchObject({ stage: 'failed', turnId, retryable: true });
+        expect(draft).toMatchObject({ stage: 'failed', turnId, retryable: false });
       });
 
       const failed = (await request('GET', `/activity?conversationId=${chat}&goalClient=page-before-reload`)).body.goal;
@@ -8776,7 +8787,7 @@ describe('the goal loop over the bridge', () => {
     }
   });
 
-  it('marks a rate-limited New Chat opening as retryable', async () => {
+  it('surfaces a rate-limited New Chat opening without authorizing an automatic retry', async () => {
     await pair();
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
@@ -8787,7 +8798,7 @@ describe('the goal loop over the bridge', () => {
       expect(opened.status).toBe(502);
       expect(opened.body).toEqual({
         error: 'rate_limited: Provider returned error',
-        retryable: true
+        retryable: false
       });
     } finally {
       globalThis.fetch = realFetch;

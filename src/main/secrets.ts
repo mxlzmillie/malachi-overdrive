@@ -114,6 +114,48 @@ export async function secureStorageStatus(platform: NodeJS.Platform = process.pl
   }
 }
 
+export type StartupSecretSnapshot = {
+  secureStorage: SecureStorageInfo;
+  hasApiKey: boolean;
+  hasGoalKey: boolean;
+  hasAtxpConnection: boolean;
+  hasCustomProviderKey: boolean;
+};
+
+/** A blocked OS credential prompt must not leave the entire renderer at its loading skeleton. */
+export async function startupSecretSnapshot(
+  platform: NodeJS.Platform = process.platform,
+  timeoutMs = 8_000
+): Promise<StartupSecretSnapshot> {
+  const unavailable = (detail: string): StartupSecretSnapshot => ({
+    secureStorage: { available: false, detail },
+    hasApiKey: false, hasGoalKey: false, hasAtxpConnection: false, hasCustomProviderKey: false
+  });
+  const probe = (async (): Promise<StartupSecretSnapshot> => {
+    const secureStorage = await secureStorageStatus(platform);
+    if (!secureStorage.available) return unavailable(secureStorage.detail ?? 'Secure credential storage is unavailable.');
+    const [hasApiKey, hasGoalKey, hasAtxpConnection, hasCustomProviderKey] = await Promise.all([
+      hasSecret('openaiApiKey'), hasSecret('openRouterApiKey'), hasSecret('atxpConnection'), hasSecret('customProviderApiKey')
+    ]);
+    return { secureStorage, hasApiKey, hasGoalKey, hasAtxpConnection, hasCustomProviderKey };
+  })();
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      probe,
+      new Promise<StartupSecretSnapshot>(resolve => {
+        timeout = setTimeout(() => resolve(unavailable(
+          platform === 'darwin'
+            ? 'macOS Keychain did not answer. Approve its access prompt or unlock the login keychain, then restart MALACHI OVERDRIVE.'
+            : 'Secure credential storage did not answer. Unlock the operating-system credential store, then restart MALACHI OVERDRIVE.'
+        )), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 export async function isEncryptionAvailable(platform: NodeJS.Platform = process.platform): Promise<boolean> {
   return (await secureStorageStatus(platform)).available;
 }

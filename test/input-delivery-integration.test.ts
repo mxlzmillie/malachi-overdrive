@@ -28,7 +28,7 @@ const { initSecretsPath } = await import('../src/main/secrets.js');
 const { initDurableStore, flushDurable, resetDurableForTests, writeDurableNow } = await import('../src/main/durable.js');
 const { createSession, rebindSession, initSessionStore, resetSessionStoreForTests } = await import('../src/main/session/store.js');
 const { registerIpc } = await import('../src/main/ipc.js');
-const { bridgePort, startBridge, stopBridge } = await import('../src/main/bridge.js');
+const { bridgePairingCode, bridgePort, startBridge, stopBridge } = await import('../src/main/bridge.js');
 const input = await import('../src/main/session/input.js');
 const goal = await import('../src/main/goal.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
@@ -48,7 +48,7 @@ beforeAll(async () => {
   await saveConfig(defaultConfig());
   registerIpc(() => ({ isDestroyed: () => false, webContents: { send: pushed } }) as never, () => undefined);
   await startBridge();
-  const paired = await post('/pair', {});
+  const paired = await post('/pair', { code: bridgePairingCode() });
   expect(paired.status).toBe(200);
   bearer = paired.body.token;
 });
@@ -71,6 +71,23 @@ it('serves staged attachment bytes only to the exact unsent browser input owner'
   expect(Buffer.from((await post('/input/attachment', request)).body.chunk, 'base64').toString()).toBe('Attachment payload');
   expect((await post('/input/claim', { ...request, authorize: true })).body.ok).toBe(true);
   expect((await post('/input/attachment', request)).status).toBe(409);
+});
+it('sends an 11k request through the owned attachment bridge without losing the authored text', async () => {
+  const text = 'Build the Control Rail and verify it.\n'.repeat(400).slice(0, 11384);
+  const row = await input.enqueueInput({ ...message(null, 'off'), mode: 'auto', text });
+  const claim = (await post('/input/claim', { id: row.id, owner: 'long-request-page', conversationId: null, requiresAuthorization: true })).body.input;
+  expect(claim.text).toContain('Full request');
+  expect(claim.text.length).toBeLessThan(1000);
+  expect(claim.attachments).toHaveLength(1);
+  const attachment = claim.attachments[0];
+  const repeated = (await post('/input/claim', { id: row.id, owner: 'long-request-page', conversationId: null, requiresAuthorization: true })).body.input;
+  expect(repeated.attachments[0].id).toBe(attachment.id);
+  const chunk = await post('/input/attachment', { id: row.id, owner: 'long-request-page', conversationId: null, attachmentId: attachment.id, offset: 0 });
+  expect(chunk.status).toBe(200);
+  expect(Buffer.from(chunk.body.chunk, 'base64').toString()).toBe(codingAgentDeliveryText(text));
+  expect((await input.listInputs()).find(entry => entry.id === row.id)?.text).toBe(text);
+  expect((await post('/input/claim', { id: row.id, owner: 'long-request-page', conversationId: null, authorize: true })).body.ok).toBe(true);
+  expect((await post('/input/attachment', { id: row.id, owner: 'long-request-page', conversationId: null, attachmentId: attachment.id, offset: 0 })).status).toBe(409);
 });
 it('revokes a claimed send via IPC, fences pre-send authorization and records a late exact receipt', async () => {
   const row = message(null, 'goal');

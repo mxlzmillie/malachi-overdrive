@@ -263,7 +263,11 @@ describe('Codex unified exec runtime parity', () => {
       shellType: process.platform === 'win32' ? 'powershell' : 'bash',
       hookCommand: 'pipe exit-code parity child',
       processId,
-      yieldTimeMs: 250,
+      // This regression is about preserving the terminal exit code and draining both pipe
+      // streams once the child has completed, not about proving a fresh Node process can start
+      // and report `exit` inside the minimum 250 ms yield under a saturated parallel test run.
+      // Give the child a bounded but scheduler-tolerant completion window.
+      yieldTimeMs: 2_000,
       maxOutputTokens: undefined,
       truncationPolicy,
       cwd: process.cwd(),

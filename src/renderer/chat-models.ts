@@ -1,5 +1,5 @@
 import type { ChatModelCatalog } from '../shared/chat-models.js';
-import { chatModelDisplayLabel, chatModelDisplayName } from '../shared/chat-models.js';
+import { canonicalRequestedChatModel, chatModelDisplayLabel, chatModelDisplayName } from '../shared/chat-models.js';
 import type { Config } from '../shared/types.js';
 import type { ReasoningEffort } from '../shared/session.js';
 import { $, el, run } from './dom.js';
@@ -16,13 +16,26 @@ let composerContext: { scope: string | null; observation: ObservedSelection | nu
 // not touch the native picker in this existing conversation.
 const CURRENT_BROWSER_MODEL = ':current-browser:';
 export type ComposerModelSettings = { model: string; reasoningEffort: ReasoningEffort } | { model: null; reasoningEffort: null };
+/** Read-only renderer projection for surfaces such as Control Rail; catalog ownership stays here. */
+export function chatModelCatalogSummary(): Pick<ChatModelCatalog, 'state' | 'observedAt' | 'error'> & { count: number } {
+  return { state: catalog.state, observedAt: catalog.observedAt, count: catalog.models.length, ...(catalog.error ? { error: catalog.error } : {}) };
+}
 const pairs = [['composerModel', 'composerReasoning'], ['workerModel', 'workerReasoning'], ['helperModel', 'helperReasoning']] as const;
 const effortNames: Record<string, string> = { none: 'Instant', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max', ultra: 'Ultra', pro: 'Pro' } satisfies Record<ReasoningEffort, string>;
 const composerEfforts = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'pro'] as const;
-function observedModel(value: string) {
+function observedModel(value: string, effort?: ReasoningEffort | '' | null) {
   const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9.]/g, '');
-  const matches = catalog.models.filter(choice => choice.id === value || choice.aliases?.includes(value) || normalize(choice.label) === normalize(value));
+  const requested = canonicalRequestedChatModel(value, effort) ?? value.trim();
+  const matches = catalog.models.filter(choice => choice.id === requested || choice.aliases?.includes(requested) || normalize(choice.label) === normalize(requested));
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+function displayModelName(choice: { id: string; label: string }, effort?: ReasoningEffort): string {
+  return chatModelDisplayName(choice.label, effort);
+}
+
+function displayModelLabel(choice: { id: string; label: string }, effort: ReasoningEffort): string {
+  return chatModelDisplayLabel(choice.label, effort, effortNames[effort]!);
 }
 
 function canUseBrowserModel(): boolean {
@@ -66,12 +79,11 @@ function composerModels() {
   // example Work) cannot claim those controls merely because their labels look alike.
   if (!catalog.models.length || nativeModelOnly()) return [];
   return catalog.models
-    .filter(model => !/^gpt[ -]?5\.5(?:$|[ -])/i.test(model.label))
     .map(model => ({ ...model, efforts: composerEfforts.filter(effort => model.efforts.includes(effort)) }))
     .filter(model => model.efforts.length > 0);
 }
 
-function options(select: HTMLSelectElement, choices: Array<{ id: string; label: string }>, value: string): void {
+function options(select: HTMLSelectElement, choices: Array<{ id: string; label: string }>, value: string, unavailableLabel?: string): void {
   const option = (label: string, id: string) => {
     const node = document.createElement('option'); node.textContent = label; node.value = id; return node;
   };
@@ -80,7 +92,7 @@ function options(select: HTMLSelectElement, choices: Array<{ id: string; label: 
     const unavailable = option('No observed choices', ''); unavailable.disabled = true; desired.push(unavailable);
   }
   if (value && !choices.some(choice => choice.id === value)) {
-    const unverified = option(`${value} · not verified`, value);
+    const unverified = option(unavailableLabel ?? `${value} · not verified`, value);
     unverified.disabled = true;
     desired.push(unverified);
   }
@@ -99,7 +111,7 @@ function paintPair(modelId: string, effortId: string, modelValue?: string, effor
   const models = modelId === 'composerModel' ? composerModels() : catalog.models;
   let nextModel = modelValue ?? model.value;
   let nextEffort = effortValue ?? effort.value;
-  nextModel = observedModel(nextModel)?.id ?? nextModel;
+  nextModel = observedModel(nextModel, nextEffort as ReasoningEffort | '' | null)?.id ?? nextModel;
   if (models.length && !nextModel) {
     // A preference selects only a model/effort actually observed in this catalog. Pro is the
     // strongest account-exposed GPT-6 variant and may be the only GPT-6 choice; requiring High
@@ -114,9 +126,9 @@ function paintPair(modelId: string, effortId: string, modelValue?: string, effor
   if (supported && !nextEffort) {
     nextEffort = supported.includes('high') ? 'high' : supported[0] ?? '';
   }
-  const choices = models.map(choice => ({ ...choice, label: chatModelDisplayName(choice.label) }));
+  const choices = models.map(choice => ({ ...choice, label: displayModelName(choice) }));
   if (modelId === 'composerModel' && canUseBrowserModel()) choices.unshift({ id: CURRENT_BROWSER_MODEL, label: 'Current browser model', efforts: [] });
-  options(model, choices, nextModel);
+  options(model, choices, nextModel, `${chatModelDisplayName(nextModel, nextEffort as ReasoningEffort)} · ${catalog.state === 'ready' ? 'Unavailable in ChatGPT' : 'not verified'}`);
   options(effort, (models.find(item => item.id === model.value)?.efforts ?? []).map(id => ({ id, label: effortNames[id] ?? id })), nextModel === CURRENT_BROWSER_MODEL ? '' : nextEffort);
 }
 
@@ -148,7 +160,7 @@ function paintComposerChoices(): void {
   }
   // Order supported levels from Low upwards; never manufacture an unobserved step.
   const steps = choices.flatMap(choice => choice.efforts.map(power => ({
-    model: choice.id, modelLabel: chatModelDisplayName(choice.label, power), effort: power, label: chatModelDisplayLabel(choice.label, power, effortNames[power]!)
+    model: choice.id, modelLabel: displayModelName(choice, power), effort: power, label: displayModelLabel(choice, power)
   })));
   const title = document.getElementById('composerPowerTitle');
   const subtitle = document.getElementById('composerPowerModel');
@@ -207,8 +219,9 @@ export function confirmedComposerModel(): ComposerModelSettings | null {
 function paintComposerLabel(): void {
   // Display the same admission decision as Send, including discovery and removed efforts.
   const confirmed = confirmedComposerModel();
+  const selected = confirmed?.model === null ? undefined : composerModels().find(model => model.id === confirmed?.model);
   const label = confirmed
-    ? confirmed.model === null ? 'Current browser model' : chatModelDisplayLabel(catalog.models.find(model => model.id === confirmed.model)!.label, confirmed.reasoningEffort, effortNames[confirmed.reasoningEffort]!)
+    ? confirmed.model === null ? 'Current browser model' : selected ? displayModelLabel(selected, confirmed.reasoningEffort) : confirmed.model
     : catalog.state === 'pending' ? 'Loading models…' : 'Select model';
   const node = $('composerModelLabel');
   node.textContent = label;
@@ -218,8 +231,23 @@ function paintComposerLabel(): void {
 
 function paintStatus(): void {
   paintComposerChoices();
+  // An unavailable saved choice stays selected and unsendable until the person
+  // chooses another model or a refreshed account catalog confirms the same pair.
+  const unavailableChoice = (modelId: string, effortId: string): string | null => {
+    const model = $<HTMLSelectElement>(modelId).value;
+    const value = $<HTMLSelectElement>(effortId).value;
+    if (!model || model === CURRENT_BROWSER_MODEL || model === 'not-observed' || !value || value === 'not-observed') return null;
+    const effort = value as ReasoningEffort;
+    const choices = modelId === 'composerModel' ? composerModels() : catalog.models;
+    const choice = choices.find(item => item.id === model);
+    return choice?.efforts.includes(effort) ? null : displayModelLabel(choice ?? { id: model, label: model }, effort);
+  };
+  const unavailable = unavailableChoice('composerModel', 'composerReasoning');
+  const savedUnavailable = pairs.slice(1).map(([model, effort]) => unavailableChoice(model, effort)).filter(Boolean);
   const message = catalog.state === 'pending' ? 'Reading your account’s model choices…'
-    : catalog.state === 'ready' ? `Available in your ChatGPT account · checked ${new Date(catalog.observedAt!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : catalog.state === 'ready' ? savedUnavailable.length
+      ? `Saved choices unavailable in the current ChatGPT model list: ${[...new Set(savedUnavailable)].join(', ')}. Choose an available model or reload models.`
+      : `Available in your ChatGPT account · checked ${new Date(catalog.observedAt!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
     : catalog.error ?? 'Connect to ChatGPT to load your models.';
   for (const id of ['chatModelStatus', 'composerModelStatus']) {
     const node = document.getElementById(id);
@@ -229,7 +257,8 @@ function paintStatus(): void {
         const inherited = confirmedComposerModel()?.model === null;
         const nativeOnly = nativeModelOnly();
         if (inherited || nativeOnly) node.textContent = browserModelDescription();
-        node.hidden = !inherited && !nativeOnly && catalog.state === 'ready';
+        else if (unavailable && catalog.state === 'ready') node.textContent = `${unavailable} is unavailable in the current ChatGPT model list. Choose an available model or reload models.`;
+        node.hidden = !inherited && !nativeOnly && !unavailable && catalog.state === 'ready';
       }
     }
   }
@@ -318,7 +347,8 @@ export function initChatModels(onPaint?: () => void): void {
     document.getElementById(modelId)?.addEventListener('change', () => {
       if (modelId === 'composerModel' && composerContext) composerContext.edited = true;
       const model = $<HTMLSelectElement>(modelId);
-      const supported = catalog.models.find(item => item.id === model.value)?.efforts ?? [];
+      const choices = modelId === 'composerModel' ? composerModels() : catalog.models;
+      const supported = choices.find(item => item.id === model.value)?.efforts ?? [];
       paintPair(modelId, effortId, model.value, supported.includes('high') ? 'high' : supported[0] ?? '');
       paintStatus();
     });

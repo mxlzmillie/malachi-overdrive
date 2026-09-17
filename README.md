@@ -29,7 +29,7 @@ Screenshots of the app with private conversation and folder details redacted. Ch
 
 ## Why this exists
 
-### Malachi Overdrive — custom v2.0.11 workspace
+### Malachi Overdrive — custom workspace
 
 This working tree includes Malachi's custom interface and local workflow changes; do not
 replace it with an upstream checkout. **Commands** in the title bar, or **Cmd+K / Ctrl+K**,
@@ -66,7 +66,7 @@ ChatGPT is a good engineer trapped in a text box. Developer mode lets it call MC
 - **Sessions that outlive the context window.** Every tool call is recorded locally with its real result. When a chat gets heavy, Compact & Resume asks it for a handoff brief, opens a fresh chat and moves the same local session across. The new chat can query everything the old one did.
 - **Plans, Goal and Loop.** Split a request into editable tasks or generate follow-ups through a separate ChatGPT helper or the API. Astra can receive the next task through `session_finish` in the same turn, without opening another model turn.
 - **External MCP plugins.** Settings → Plugins installs integrations such as Blender MCP, Playwright, Memory and Web Fetch behind a separate **MALACHI OVERDRIVE Plugins** connector. Enable individual tools, import MCPB bundles or connect custom local/remote servers. [Setup and supported sources](docs/plugins.md). External servers run with their own OS/service permissions, outside MALACHI OVERDRIVE's approved-folder sandbox.
-- **You stay the permission boundary.** Only the folders you approve are visible. Each capability is a switch. Read-only mode is a single kill switch. Nothing runs on this machine that you did not turn on.
+- **You stay the permission boundary.** File tools see approved folders. Each capability is a switch, and read-only mode is a single kill switch. Review the first-launch defaults before connecting ChatGPT: several Core tools, and Windows Desktop control, start enabled.
 
 It runs in the tray, hosts no model of its own, and works with the ChatGPT you already use in the browser.
 
@@ -94,7 +94,7 @@ shasum -a 256 MALACHI-OVERDRIVE-macOS-arm64.dmg    # macOS
 sha256sum MALACHI-OVERDRIVE-Linux-x64.AppImage     # Linux
 ```
 
-> **This is a beta with real permissions.** A fresh install starts with Core capabilities on except opt-in ChatGPT file saving, read-only mode off, multi-agent mode on with two workers, and, on Windows, the Desktop permissions on. On macOS the Desktop permissions start off; enable them in **Settings → Workspace**, then grant Screen Recording and Accessibility in System Settings. Linux has Core tools but no Desktop computer-control backend. Review folder access before connecting: `exec_command` runs programs as your logged-in user.
+> **This is a beta with real permissions.** A fresh install starts with Core capabilities on except opt-in ChatGPT file saving, read-only mode off, multi-agent mode on with three worker slots, and, on Windows, the Desktop permissions on. Existing installations retain their saved worker limit; older configurations without one use two. On macOS the Desktop permissions start off; enable them in **Settings → Workspace**, then grant Screen Recording and Accessibility in System Settings. Linux has Core tools but no Desktop computer-control backend. Review folder access before connecting: `exec_command` runs programs as your logged-in user.
 
 ## Requirements
 
@@ -114,7 +114,7 @@ Use a normal ChatGPT conversation with the custom app enabled. OpenAI's built-in
 2. Open **Settings → Workspace**, review permissions and approve a project folder. Press **Add**, or drop the folder onto the Folders card.
 3. Create an OpenAI Secure MCP Tunnel and a restricted API key, then press **Connect**. Details below.
 4. In ChatGPT on the web, enable Developer mode and create the **Core** app from the tunnel. On Windows, create the **Desktop** app too if you left screen and input control on; on macOS, if you switched them on.
-5. Press **Open extension folder**, open `chrome://extensions`, enable Developer mode, choose **Load unpacked** and select that folder. Pairing is automatic.
+5. Press **Open extension folder**, open `chrome://extensions` (or `edge://extensions`), enable Developer mode, choose **Load unpacked** and select that folder. Open the companion popup, enter the one-time code shown in Overdrive's **Setup → Browser** screen, then press **Connect**. The code changes after a successful pair or disconnect.
 
 **Settings → Setup** marks each hop done only once the app has actually seen traffic on it. Back in chat, select a project and model, write a message, or choose **Create plan** from the gear. Images can be attached or dropped into the composer.
 
@@ -180,7 +180,7 @@ For the API backend, choose OpenRouter or a custom OpenAI-compatible endpoint un
 
 ### Multi-agent mode
 
-One prime chat can open up to eight worker chats (two by default) and exchange brokered messages with them through the `agents` tool. Provider rate limits still apply. Workers cannot talk to each other.
+One prime chat can open up to eight concurrent worker chats (three slots on a fresh install; older configurations without a saved limit use two) and exchange brokered messages with them through the `agents` tool. Provider rate limits still apply. Workers cannot talk to each other.
 
 Workers are reusable conversations. When one reports its result it goes to sleep, frees its slot and keeps its full chat. Messaging it again wakes the same conversation. At about 400k recorded tokens a worker becomes non-revivable after its next stop; workers never compact themselves. With background chats enabled, app-managed tabs share one browser window. Sleeping and finished worker tabs become eligible for closure after one minute, even below the worker limit. This releases browser memory while preserving the reusable conversation. Active chats and unsent drafts remain protected.
 
@@ -212,7 +212,7 @@ The MCP connector uses ChatGPT's documented Developer mode and Secure MCP Tunnel
 
 The published 2.0.6 build's English-language and nested-picker workaround remains relevant until you install a build containing these fixes. The current source reads account-evaluated model IDs, available efforts and version choices instead of English picker labels. New model families appear after **Reload ChatGPT models**, provided ChatGPT exposes them to your account in the supported picker structure. Discovery restores the previous selection and sends no message.
 
-The current composer accepts dropped files (including Markdown) and dropped text, or **Add photos & files**. Files keep their original bytes and appear as compact filename cards above the message. Up to 20 files and 512 MB total can be prepared per message; ChatGPT's account, format and upload limits still determine acceptance. Files wait for the next native message when a turn is running. The app sends only after every attachment is confirmed and the draft is still unchanged. A failed upload leaves a visible error and is never automatically resent. Install the matching protocol-13 companion with this source build.
+The current composer accepts dropped files (including Markdown) and dropped text, or **Add photos & files**. Files keep their original bytes and appear as compact filename cards above the message. For browser delivery, prepared messages longer than 8,000 characters are sent as an attached text file with a short instruction to read it; the original authored message remains in local history. Up to 20 files and 512 MB total can be prepared per message; ChatGPT's account, format and upload limits still determine acceptance. Files wait for the next native message when a turn is running. The app sends only after every attachment is confirmed and the draft is still unchanged. A failed upload leaves a visible error and is never automatically resent. Install the matching protocol-14 companion with this source build and enter the one-time code from **Setup → Browser** in its popup.
 
 Opening the app reuses an idle ChatGPT tab for its initial observation when the browser is already present; showing the window again does not refresh a ready catalog or open Chrome. Explicit model reloads also reuse suitable tabs. A pending operation keeps its selected tab through settings navigation and extension-worker suspension. A slow page or missing receipt never authorizes a second OS open.
 

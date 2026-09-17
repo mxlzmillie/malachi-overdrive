@@ -11,6 +11,32 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.18] — 2026-09-17
+
+- Provider-compliance audit: Goal/Loop now treats explicit HTTP 429 provider rate limits as a
+  surfaced, non-auto-retry boundary instead of repeatedly asking the same provider restriction.
+  Transient transport and server failures keep their existing recovery/backoff behavior.
+- Native-source packaging keeps its bounded transient-download retries, but HTTP 429 now waits at
+  least 15 seconds by default and honors a provider `Retry-After` value before the next attempt.
+- Re-verified explicit worker-model admission as fail-closed: a fresh account picker must prove the
+  requested model/reasoning pair before any worker is published, with no silent model substitution.
+- Secured local companion pairing with a rotating code shown in Setup → Browser and required by the
+  protocol-14 extension. A loopback caller can no longer mint a browser token just by finding the port.
+- Protected project previews with unguessable URLs and live approved-folder/read checks, so revoking
+  a permission also blocks an already-open preview link.
+- Classified durable Goal HTTP 4xx responses as non-auto-retryable while retaining recovery for
+  transient 408/425 and server/transport failures.
+- Added a fourteen-scenario release benchmark record that separates automated regression fixtures
+  from live workflows and leaves unobserved model/worker facts explicitly unknown.
+- Bounded initial OS credential-store probing so a pending macOS Keychain prompt can no longer
+  leave the entire renderer on its loading skeleton indefinitely; startup shows a recovery step.
+- Replaced the older agent side panel with the Control Rail operational view and kept missing or
+  partially loaded bridge state fail-safe instead of crashing session rendering.
+- Stabilized the completed pipe-command parity regression so saturated CI scheduling does not
+  mistake a still-running child for a lost exit code/output-drain result.
+
+See [the full release notes](docs/release-notes/v2.0.18.md).
+
 ## [2.0.17] — 2026-09-15
 
 - Carries forward the five reviewed GitHub tool-library entries from 2.0.16: free-for.dev, Public APIs, EasySpider, Awesome MCP Servers, and Strix.

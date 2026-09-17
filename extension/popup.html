@@ -31,6 +31,10 @@
 
 
       <p class="alert" id="alert" hidden></p>
+      <label class="pairing" id="pairing" hidden>Pairing code from MALACHI OVERDRIVE → Setup → Browser
+        <input id="pairingCode" type="text" maxlength="15" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXXX-XXXXXX" />
+        <button id="retryBtn" type="button">Connect</button>
+      </label>
       <p class="caption">Session capture</p>
       <section class="card">
         <div class="row" id="r-tab">
@@ -101,7 +105,6 @@
       <dl class="grid" id="grid"></dl>
       <div class="actions">
         <button id="copyBtn" type="button">Copy</button>
-        <button id="retryBtn" type="button" hidden>Try again</button>
         <button id="unpairBtn" type="button" hidden>Disconnect</button>
       </div>
     </details>

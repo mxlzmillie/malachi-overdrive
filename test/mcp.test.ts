@@ -1018,8 +1018,10 @@ describe('capability gating', () => {
     const reply = await core('tools/call', { name: 'preview', arguments: { path: '/workspace/site' } });
     expect(failed(reply)).toBe(false);
     const url = String(reply.body.result?.structuredContent?.url ?? '');
-    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/);
+    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{32,}\/$/);
     expect((await rawGet(url)).text).toContain('Preview fixture');
+    ctx.caps = withCaps({ read: false });
+    expect((await rawGet(url)).status).toBe(403);
   });
 
   it('hides every writing and running tool in read-only mode', async () => {

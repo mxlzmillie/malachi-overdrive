@@ -303,6 +303,7 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
     exposed.agentTools = exposed.agentTools || agentTools;
     return {
       ...live,
+      liveContext: getContext,
       sessionTools,
       agentTools,
       exposedCaps: { ...exposed.caps },

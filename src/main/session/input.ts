@@ -18,7 +18,13 @@ import { noteChatOrigin } from './recorder.js';
 import { isAstraModel } from '../../shared/chat-models.js';
 import { automaticFinishEnabled } from '../goal.js';
 import { finishInstruction, finishInputInstruction } from '../../shared/finish.js';
-import { attachmentSchema, validateInputAttachments } from './input-attachments.js';
+import { attachmentSchema, stageInputAttachment, validateInputAttachments } from './input-attachments.js';
+import { continuationForSession } from './continuation.js';
+
+export const COMPACTION_INPUT_MESSAGE = 'This chat is moving to a new conversation. Your message was not queued. Wait for Compact & Resume, or cancel compaction from Chat options and start a new chat.';
+export function assertSessionInputAvailable(sessionId: string | null): void {
+  if (sessionId && continuationForSession(sessionId)) throw new Error(COMPACTION_INPUT_MESSAGE);
+}
 
 export const inputTextSchema = z.string().trim().min(1).max(MAX_INPUT_TEXT_CHARS, INPUT_TEXT_LIMIT_MESSAGE);
 export const inputArgs = z.object({
@@ -74,6 +80,9 @@ const entrySchema = inputArgs.extend({
 export type InputEntry = z.infer<typeof entrySchema>;
 const STATE = 'session-input';
 const TOOL_INPUT_TEXT_BYTES = 128000;
+// ChatGPT's native composer converts large text insertions into uploads. Keep the
+// browser handout below that boundary and send the exact prepared text as a file.
+const MAX_INLINE_BROWSER_TEXT_CHARS = 8_000;
 type InputDeliveryHooks = {
   hasActivity?: (session: SessionSummary) => boolean;
   wakeDecision?: (entry: Readonly<InputEntry>, signal: AbortSignal) => Promise<void>;
@@ -88,6 +97,7 @@ let deliveryHooks: InputDeliveryHooks | null = null;
 export function configureInputDelivery(hooks: InputDeliveryHooks): void { deliveryHooks = hooks; }
 /** One delivery policy for composer presentation, admission and the final send fence. */
 export async function sessionInputPolicy(sessionId: string, observedActivity?: boolean): Promise<{ queueAtFinish: boolean; canInject: boolean; browserAllowed: boolean }> {
+  if (continuationForSession(sessionId)) return { queueAtFinish: false, canInject: false, browserAllowed: false };
   const session = await getSession(sessionId);
   if (!session?.conversationId || isChatBlocked(session.conversationId)) return { queueAtFinish: false, canInject: false, browserAllowed: false };
   const hasActivityObserver = observedActivity !== undefined || deliveryHooks?.hasActivity !== undefined;
@@ -330,6 +340,7 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
       if (JSON.stringify(inputArgs.parse({ ...prior, mode: prior.requestedMode ?? prior.mode })) !== JSON.stringify(input)) throw new Error('Message id already belongs to different input');
       return { ...prior };
     }
+    assertSessionInputAvailable(input.sessionId);
     const policy = input.sessionId ? await sessionInputPolicy(input.sessionId) : null;
     const requestedMode = input.mode;
     if (input.attachments?.length) {
@@ -574,7 +585,17 @@ export function claimBrowserInput(id: string, owner: string, conversationId: str
       if (entry.state === 'queued' && !queuedFollowup(entry) && first !== entry) return null;
     }
     let claimed: InputEntry;
-    try { claimed = prepare({ ...entry, ...(completedTurnId ? { completedTurnId } : {}), state: 'browser', owner, conversationId, offeredAt: entry.offeredAt ?? Date.now(), requiresAuthorization }); }
+    try {
+      claimed = prepare({ ...entry, ...(completedTurnId ? { completedTurnId } : {}), state: 'browser', owner, conversationId, offeredAt: entry.offeredAt ?? Date.now(), requiresAuthorization });
+      if (claimed.purpose !== 'decision' && claimed.deliveryText!.length > MAX_INLINE_BROWSER_TEXT_CHARS) {
+        if ((claimed.attachments?.length ?? 0) >= 20) throw new Error('This long message needs one attachment slot; remove a file and send again');
+        const name = `Full request ${claimed.id.slice(0, 8)}.txt`;
+        const retained = new Set(current.filter(row => !terminal(row)).flatMap(row => row.attachments?.map(file => file.id) ?? []));
+        const attachment = await stageInputAttachment({ name, bytes: Buffer.from(claimed.deliveryText!, 'utf8') }, retained);
+        claimed = { ...claimed, attachments: [...(claimed.attachments ?? []), attachment],
+          deliveryText: `Read the complete request and coding-agent instructions in the attached ${name}. Carry out the entire request.` };
+      }
+    }
     catch (error) {
       // A never-handed-out oversized legacy row needs a visible terminal result,
       // not an endless series of browser claims. Existing claims keep their receipt.

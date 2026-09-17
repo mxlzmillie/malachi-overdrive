@@ -1,12 +1,12 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 const ports = vi.hoisted(() => ({ backgroundChats: false, running: false as boolean | null, connect: vi.fn(), status: { state: 'connected', detail: '' },
-  browser: { connected: false, present: false, lastSeenAt: null as number | null }, open: vi.fn(), bridge: vi.fn(), enqueue: vi.fn(), cancel: vi.fn(), note: vi.fn(), rows: [] as InputEntry[], listeners: new Set<() => void>() }));
+  browser: { connected: false, present: false, lastSeenAt: null as number | null }, open: vi.fn(), bridge: vi.fn(), guard: vi.fn(), enqueue: vi.fn(), cancel: vi.fn(), note: vi.fn(), rows: [] as InputEntry[], listeners: new Set<() => void>() }));
 vi.mock('../src/main/connection.js', () => ({ connect: ports.connect, getStatus: () => ports.status, onStatusChange: (fn: () => void) => { ports.listeners.add(fn); return () => ports.listeners.delete(fn); } }));
 vi.mock('../src/main/bridge.js', () => ({ bridgeStatus: async () => ports.browser, browserWakeConnected: () => ports.browser.connected, startBridge: ports.bridge }));
 vi.mock('../src/main/browser.js', () => ({ openInPreferredBrowser: ports.open, isPreferredBrowserRunning: async () => ports.running }));
 vi.mock('../src/main/config.js', () => ({ getConfig: () => ({ ui: { backgroundChats: ports.backgroundChats } }) }));
-vi.mock('../src/main/session/input.js', () => ({ enqueueInput: ports.enqueue, cancelInput: ports.cancel, noteInputStartupError: ports.note, listInputs: async () => ports.rows }));
+vi.mock('../src/main/session/input.js', () => ({ assertSessionInputAvailable: ports.guard, enqueueInput: ports.enqueue, cancelInput: ports.cancel, noteInputStartupError: ports.note, listInputs: async () => ports.rows }));
 import { sendDesktopInput, cancelDesktopInput, retryQueuedInputBrowser, resetInputStartupForTests } from '../src/main/session/start-input.js';
 const request: InputArgs = { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', sessionId: null, text: 'Please start', mode: 'auto', dueAt: 0, model: null, reasoningEffort: null };
 beforeEach(() => {
@@ -29,6 +29,13 @@ it('waits for the existing connector readiness event before publishing input', a
   for (const listener of ports.listeners) listener();
   await pending;
   expect(ports.enqueue).toHaveBeenCalledTimes(1); expect(ports.listeners.size).toBe(0);
+});
+it('reports a moving chat before waiting for connector or browser startup', async () => {
+  ports.guard.mockImplementationOnce(() => { throw new Error('This chat is moving'); });
+  await expect(sendDesktopInput({ ...request, sessionId: 'moving-chat' })).rejects.toThrow('This chat is moving');
+  expect(ports.connect).not.toHaveBeenCalled();
+  expect(ports.enqueue).not.toHaveBeenCalled();
+  expect(ports.open).not.toHaveBeenCalled();
 });
 it('retries only the failed browser wake for the same queued UUID', async () => {
   ports.open.mockRejectedValueOnce(new Error('startup refused'));

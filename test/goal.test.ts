@@ -220,12 +220,12 @@ describe('the instruction the goal model is given', () => {
 });
 
 describe('what leaves this machine', () => {
-  it('preserves transient API retry classification and Retry-After for finish follow-ups', async () => {
+  it('preserves transient retry classification while rate limits remain non-auto-retryable', async () => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, loopBackend: 'api' } });
     const session = await createSession({ title: 'finish retry', conversationId: 'finish-api-retry' });
     const context = [{ role: 'user' as const, content: 'Finish checking the project' }];
     globalThis.fetch = vi.fn(async () => new Response('busy', { status: 429, headers: { 'Retry-After': '37' } }));
-    await expect(goal.draftFastFollowup(session.id, undefined, context)).rejects.toMatchObject({ retryable: true, retryAfterMs: 37000 });
+    await expect(goal.draftFastFollowup(session.id, undefined, context)).rejects.toMatchObject({ retryable: false, retryAfterMs: 37000 });
     globalThis.fetch = vi.fn(async () => new Response('bad key', { status: 401 }));
     await expect(goal.draftFastFollowup(session.id, undefined, context)).rejects.toMatchObject({ retryable: false });
     globalThis.fetch = vi.fn(async () => { throw new TypeError('network disconnected'); });
@@ -682,17 +682,16 @@ describe('the reply', () => {
   /**
    * One draft is one request, and a failure is not an answer.
    *
-   * The two answers that end a Goal run are `[no reply]` and words to type. A dead socket, a
-   * try-later status, a stream that breaks and a reply this app cannot read are all the same
-   * event — no answer — so none of them may spend the turn: the draft settles `failed` and
-   * `retryable`, which is the page loop being told the turn is still owed one. Asking again is
-   * that loop's job, because only it can still see whether this is the turn being answered.
+   * The two answers that end a Goal run are `[no reply]` and words to type. A dead socket,
+   * transient server failure, a stream that breaks and a reply this app cannot read are all the
+   * same event — no answer — so none of them may spend the turn. Explicit provider enforcement
+   * such as a rate limit is different: the turn remains owed, but the app must not automatically
+   * pay the provider again while that restriction is active.
    */
   it('asks once per draft, and leaves an unanswered turn still owed an answer', async () => {
     const cases: Array<[string, () => unknown]> = [
       ['socket', () => { throw new TypeError('fetch failed'); }],
       ['408', () => new Response('{}', { status: 408 })],
-      ['429', () => new Response('{}', { status: 429 })],
       ['503', () => new Response('{}', { status: 503 })],
       ['broken-stream', () => stream([delta('half an instruction'), `data: ${JSON.stringify({ error: { message: 'upstream provider failed' } })}\n`, 'data: [DONE]\n'])],
       ['malformed', () => stream([delta('unfinished thought'), 'data: {not-json}\n'])],
@@ -717,11 +716,12 @@ describe('the reply', () => {
     }
   });
 
-  /** A refused key, an empty account or a model id nobody knows answers the same way twice. */
+  /** A refused key, empty account, rate limit or unknown model answers the same way twice. */
   it('asks once about a failure the same request would only repeat', async () => {
     const cases: Array<[string, () => unknown]> = [
       ['auth', () => new Response('{}', { status: 401 })],
       ['credit', () => new Response('{}', { status: 402 })],
+      ['rate-limit', () => new Response('{}', { status: 429 })],
       ['unknown-model', () => new Response('{}', { status: 404 })]
     ];
     for (const [name, fail] of cases) {
@@ -2096,14 +2096,27 @@ describe('opening a chat on a goal', () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it('preserves Retry-After without retrying ambiguous browser sends', async () => {
+  it('preserves Retry-After as information but never auto-retries a provider rate limit', async () => {
     globalThis.fetch = (async () => new Response('busy', { status: 429, headers: { 'Retry-After': '37' } })) as never;
     const result = await goal.draftOpeningMessage('Implement the change');
-    expect(result).toMatchObject({ retryable: true, retryAfterMs: 37000 });
+    expect(result).toMatchObject({ retryable: false, retryAfterMs: 37000 });
     if (!('error' in result)) throw new Error('expected rate limit');
-    expect(goal.nativeGoalFailure(result.error, 'api', result.retryAfterMs)).toMatchObject({ retryable: true, retryAfterMs: 37000 });
+    expect(goal.nativeGoalFailure(result.error, 'api', result.retryAfterMs)).toMatchObject({ retryable: false, retryAfterMs: 37000 });
     expect(goal.nativeGoalFailure(result.error, 'chatgpt')).toMatchObject({ retryable: false });
     expect(goal.nativeGoalFailure('auth_rejected: bad key', 'api')).toMatchObject({ retryable: false });
+  });
+
+  it('does not retry malformed or durable client-status provider failures', async () => {
+    for (const status of [400, 409, 413, 422]) {
+      const request = vi.fn(async () => new Response('invalid request', { status }));
+      globalThis.fetch = request as never;
+      const result = await goal.draftOpeningMessage('Implement the change');
+      expect(result, String(status)).toMatchObject({ retryable: false });
+      if (!('error' in result)) throw new Error('expected provider failure');
+      expect(result.error).toContain(`http_${status}`);
+      expect(goal.nativeGoalFailure(result.error, 'api').retryable).toBe(false);
+      expect(request).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('writes the first message from the goal alone', async () => {

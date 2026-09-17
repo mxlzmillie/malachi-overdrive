@@ -58,7 +58,7 @@ describe('session finish turn identity', () => {
     await announceTransport(sessionId, 'Ready');
     await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
     vi.useFakeTimers();
-    fail(new TaskRequestError('rate_limited: busy', true));
+    fail(new TaskRequestError('http_503: busy', true));
     await vi.advanceTimersByTimeAsync(0);
     await announceTransport(sessionId, 'Still waiting');
     await vi.advanceTimersByTimeAsync(14999);

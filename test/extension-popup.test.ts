@@ -7,11 +7,11 @@ const script = await readFile(new URL('../extension/popup.js', import.meta.url),
 let popup: JSDOM | undefined;
 afterEach(() => { popup?.window.close(); });
 
-function openPopup(reload: () => void) {
+function openPopup(reload: () => void, sendMessage: (message: unknown) => Promise<unknown> = () => new Promise(() => undefined)) {
   popup = new JSDOM(html, { url: 'https://extension-popup.test/', runScripts: 'outside-only' });
   const unavailable = () => new Promise(() => undefined);
   Object.assign(popup.window, {
-    chrome: { runtime: { reload, sendMessage: unavailable }, storage: { local: { get: unavailable } } },
+    chrome: { runtime: { reload, sendMessage }, storage: { local: { get: unavailable } } },
     setInterval: () => 0
   });
   popup.window.eval(script);
@@ -24,6 +24,23 @@ it('reloads only on explicit click even when the worker is unavailable', () => {
   expect(reload).not.toHaveBeenCalled();
   document.getElementById('reloadBtn')!.click();
   expect(reload).toHaveBeenCalledTimes(1);
+});
+
+it('sends a valid app-window code only on explicit Connect', async () => {
+  const sendMessage = vi.fn(async (message: any) => message.type === 'status'
+    ? { connected: true, paired: false, compatible: true, port: 8765 }
+    : null);
+  const document = openPopup(vi.fn(), sendMessage);
+  (popup!.window as any).paintHeader({ connected: true, paired: false, compatible: true, port: 8765 });
+  expect((document.getElementById('pairing') as HTMLElement).hidden).toBe(false);
+  document.getElementById('retryBtn')!.click();
+  expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pair' }));
+  const input = document.getElementById('pairingCode') as HTMLInputElement;
+  input.value = 'ABCDEF-123456';
+  document.getElementById('retryBtn')!.click();
+  await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: 'pair', code: 'ABCDEF-123456' }));
+  (popup!.window as any).paintHeader({ connected: true, paired: true, compatible: true, port: 8765 });
+  expect((document.getElementById('pairing') as HTMLElement).hidden).toBe(true);
 });
 
 it('reports only app reachability from compatible health and pairing', () => {

@@ -10,6 +10,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { createHash } from 'node:crypto';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
 const { APP_VERSION, BRIDGE_PROTOCOL } = await import('../src/main/version.js');
@@ -39,8 +40,8 @@ describe('extension release metadata', () => {
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);
     expect(manifest.version).toBe(APP_VERSION);
-    expect(BRIDGE_PROTOCOL).toBe(13);
-    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 13;');
+    expect(BRIDGE_PROTOCOL).toBe(14);
+    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 14;');
   });
 
   /**
@@ -88,24 +89,16 @@ describe('extension release metadata', () => {
     expect(code).not.toMatch(/JSON\.stringify/);
   });
 
-  /**
-   * The installed popup showed "Paired · port 8765" with a green dot and, underneath it,
-   * a six-digit code field and a Pair button — a page contradicting itself about the one
-   * thing it exists to report. There is nothing to type any more, so the way to keep that
-   * from coming back is for the markup to have no field to type into.
-   */
-  it('has no pairing-code UI anywhere in the popup', async () => {
+  it('shows a pairing-code field only when the bridge needs authorization', async () => {
     const dir = path.join(process.cwd(), 'extension');
     const [html, js] = await Promise.all([
       fs.readFile(path.join(dir, 'popup.html'), 'utf8'),
       fs.readFile(path.join(dir, 'popup.js'), 'utf8')
     ]);
-    expect(html).not.toMatch(/<form/i);
-    expect(html).not.toMatch(/000000|six[- ]digit|pairing code/i);
-    expect(html).not.toMatch(/type=["'](?:text|number|password)["']/i);
-    expect(js).not.toMatch(/\bcode\b/);
-    // The message the worker understands carries no code either.
-    expect(js).not.toMatch(/type: 'pair'[^}]*code/);
+    expect(html).toContain('id="pairingCode"');
+    expect(html).toContain('id="pairing" hidden');
+    expect(js).toContain("$('pairing').hidden = ready || incompatible");
+    expect(js).toContain("{ type: 'pair', code }");
   });
 
   it('ships Overwrite on by default and exposes one persistent toggle that refreshes immediately', async () => {
@@ -808,6 +801,53 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     });
     return { fetch, asked, actions, failedActions, arm: (id: string) => { outstanding = id; } };
   }
+
+  it.each([true, false])('recovers only an exact receipt from the original tab after a fresh-chat navigation (%s)', async (exact) => {
+    const inputId = 'ffffffff-1111-4222-8333-444444444444';
+    const owner = '21:old-document:0';
+    const digest = createHash('sha256').update('Deliverycheck').digest('hex');
+    const acknowledgements: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (input: string, init?: Record<string, unknown>) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/status') return response(200, { ok: true, repairs: [], inputs: [], inputOpeningIds: [],
+        inputReceipts: [{ id: inputId, owner, digest }] });
+      if (url.pathname === '/input/ack') {
+        acknowledgements.push(JSON.parse(String(init?.body)));
+        return response(200, { ok: true });
+      }
+      return response(200, { ok: true });
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+      tabsGet: async id => ({ id, url: `https://chatgpt.com/c/${CHAT}` }),
+      tabsQuery: async () => [],
+      tabsSendMessage: async (id, message) => message.type === 'clf-confirm-input-receipt' && id === 21
+        ? { ok: true, conversationId: CHAT, messageId: 'exact-user-id', digest: exact ? digest : '0'.repeat(64) }
+        : { ok: false }
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await worker.fireAlarm();
+    expect(acknowledgements).toEqual(exact ? [{ id: inputId, owner, conversationId: CHAT, messageId: 'exact-user-id' }] : []);
+  });
+
+  it('keeps maintenance responsive while a receipt document does not answer', async () => {
+    let releaseProbe: ((value: unknown) => void) | undefined;
+    const probe = new Promise(resolve => { releaseProbe = resolve; });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
+      fetch: async input => new URL(input).pathname === '/hello'
+        ? response(200, { app: 'chat-on-steroids', paired: true })
+        : response(200, { ok: true, repairs: [], inputs: [], inputOpeningIds: [], inputReceipts: [{
+          id: 'ffffffff-1111-4222-8333-444444444444', owner: '21:old-document:0', digest: 'a'.repeat(64)
+        }] }),
+      tabsGet: async id => ({ id, url: `https://chatgpt.com/c/${CHAT}` }), tabsQuery: async () => [],
+      tabsSendMessage: async (_id, message) => message.type === 'clf-confirm-input-receipt' ? probe : { ok: false }
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await worker.fireAlarm();
+    await worker.fireAlarm();
+    expect(worker.tabsSendMessage.mock.calls.filter(([, message]) => message.type === 'clf-confirm-input-receipt')).toHaveLength(1);
+    releaseProbe?.({ ok: false });
+  });
 
   it('repairs a protected chat recorder before offering its pending desktop input', async () => {
     const inputId = 'ffffffff-1111-4222-8333-444444444444';

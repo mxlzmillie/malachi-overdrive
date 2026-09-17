@@ -2,10 +2,10 @@ import { showProjectFiles, showWorkLibrary } from './project-files.js';
 import { createCommandCenter, type CommandSnapshot, type WorkCommand } from './command-center.js';
 import { WORK_RECIPES, appendWorkRecipe, projectContinuation } from './work-recipes.js';
 import { createWorkbench, type WorkbenchChat } from './workbench.js';
-import { applyChatModels, applyComposerSessionModel, initChatModels, confirmedComposerModel, ensureComposerModel } from './chat-models.js';
+import { applyChatModels, applyComposerSessionModel, chatModelCatalogSummary, initChatModels, confirmedComposerModel, ensureComposerModel } from './chat-models.js';
 import { marked, Marked } from 'marked';
 import { safeExternalLink } from '../shared/external-link.js';
-import { createAgentPanel } from './agent-panel.js';
+import { createControlRail, projectControlRail } from './control-rail.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { toolResultText } from './tool-result.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
@@ -128,7 +128,7 @@ const PROJECT_TASK_PAGE_SIZE = 5;
 function draftKey(): string { return selectedId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new'); }
 let selectionGeneration = 0;
 let pendingNewInput: { id: string; generation: number } | null = null;
-let agentPanel: ReturnType<typeof createAgentPanel> | null = null;
+let controlRail: ReturnType<typeof createControlRail> | null = null;
 const expandedWorkers = new Set<string>();
 const inputDrafts = new Map<string, string>();
 const imageDrafts = new Map<string, Array<InputImage | InputAttachment>>();
@@ -679,7 +679,7 @@ function paintSessions(): void {
   const extras = document.createElement('details'); extras.className = 'session-diagnostics';
   extras.append(el('summary', '', 'Other folders and older copies'), ...other);
   list.replaceChildren(...primary, ...(other.length ? [extras] : []), ...rows);
-  agentPanel?.update(selectedId, sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && selectedId !== null));
+  updateControlRail();
   badgeKey = badgeSignature();
   $('sessionsEmpty').hidden = sessions.length > 0 || projects.length > 0;
   const project = selectedWork();
@@ -745,6 +745,8 @@ let controlledStopPending = false;
 let controlledFinishWaiting = false;
 let controlledQueueAtFinish = false;
 let controlledCanInject = false;
+let controlledCompactionBusy = false;
+const compactionComposerMessage = 'This chat is moving to a new conversation. Wait for Compact & Resume, or cancel compaction from Chat options and start a new chat.';
 let pendingComposerInputs: InputEntry[] = [];
 let inputQueueGeneration = 0;
 let goalIntentGeneration = 0;
@@ -981,7 +983,8 @@ async function refreshSessionControls(): Promise<void> {
   const id = selectedId, generation = ++controlsGeneration;
   const menu = $('sessionControls');
   paintAutomationSwitch();
-  if (!id) { controlledSessionId = null; controlledTurnId = null; paintDeliveryControls(); menu.hidden = false;
+  if (!id) { controlledSessionId = null; controlledTurnId = null; controlledCompactionBusy = false; paintDeliveryControls(); menu.hidden = false;
+    if ($('composerStatus').textContent === compactionComposerMessage) $('composerStatus').textContent = '';
     $<HTMLTextAreaElement>('sessionObjective').disabled = false;
     paintTaskActions();
     for (const action of ['compactSession', 'cancelCompaction']) $(action).hidden = true;
@@ -997,6 +1000,10 @@ async function refreshSessionControls(): Promise<void> {
   controlledFinishWaiting = controls?.finishWaiting === true;
   controlledQueueAtFinish = controls?.queueAtFinish === true;
   controlledCanInject = controls?.canInject ?? controlledTurnId !== null;
+  controlledCompactionBusy = controls?.job?.busy === true;
+  const composerStatus = $('composerStatus');
+  if (controlledCompactionBusy) composerStatus.textContent = compactionComposerMessage;
+  else if (composerStatus.textContent === compactionComposerMessage) composerStatus.textContent = '';
   paintDeliveryControls();
   paintStateLine();
   menu.hidden = !controls;
@@ -1563,7 +1570,7 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
           open.setAttribute('aria-label', `Open ${worker} chat`);
           const arrow = icon('i-out'); arrow.setAttribute('aria-hidden', 'true');
           open.append(el('span', '', 'Open worker chat'), arrow);
-          open.onclick = () => void agentPanel?.open(matches[0]!.id); box.append(open);
+          open.onclick = () => void controlRail?.openWorker(matches[0]!.id); box.append(open);
         }
       }
       return box;
@@ -2119,6 +2126,7 @@ function paintDetail(followBottom = true): void {
   $('chatFoot').textContent = facts.join(' · ');
   $('chatFoot').hidden = !deps.state()?.config.ui.developerMode;
   $('chatFoot').classList.toggle('is-warn', pressureOf(selectedId ?? '')?.level === 'huge');
+  updateControlRail();
 }
 
 // -------------------------------------------------------------------- handoff
@@ -2852,10 +2860,11 @@ export function chatApply(state: AppState, previous?: Config): void {
             }`
           : `Listening on 127.0.0.1:${bridge.port ?? '?'} · no browser is authorized or connected yet.`;
   $('bridgeState').classList.toggle('is-warn', browserRequired && (!bridge.present || !secureStorageAvailable));
+  void run(api.bridgePairingCode()).then(code => { if (code) $('bridgePairingCode').textContent = code; });
   void showExtensionPath();
 
   if (sessions.length > 0) paintSessions();
-  else commandCenter?.refresh();
+  else { commandCenter?.refresh(); updateControlRail(); }
 }
 
 /** Called when the Chat tab becomes visible or is left, so it only polls when shown. */
@@ -2896,6 +2905,7 @@ async function refreshInputQueue(): Promise<void> {
   const [all, pausedHelpers] = await Promise.all([run(api.listInputs()), run(api.listPausedHelpers())]);
   if (!all || selection !== selectionGeneration || request !== inputQueueGeneration) return;
   pendingComposerInputs = all;
+  updateControlRail();
   for (const id of dismissedInputNotices) if (!all.some(entry => entry.id === id)) dismissedInputNotices.delete(id);
   paintDeliveryControls();
   const pending = pendingNewInput;
@@ -3214,6 +3224,11 @@ async function sendComposer(delivery?: 'finish', plan?: string[]): Promise<boole
     }
     return;
   }
+  if (selectedId && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledCompactionBusy) {
+    $('composerStatus').textContent = compactionComposerMessage;
+    toast(compactionComposerMessage);
+    return false;
+  }
   const discoveryGeneration = ++composerDiscoveryGeneration;
   const discoverySelection = selectionGeneration, discoverySession = selectedId, discoveryDraft = input.value;
   const modelSettings = confirmedComposerModel() ?? await ensureComposerModel();
@@ -3356,6 +3371,39 @@ function selectedWork(): LocalProject | undefined {
   return projects.find(project => project.id === projectId);
 }
 
+/**
+ * The Control Rail is a read-only projection of state already owned elsewhere. It deliberately
+ * has no recorder, queue, browser bridge or agent state of its own.
+ */
+function updateControlRail(): void {
+  if (!controlRail) return;
+  const state = deps.state();
+  const summary = sessions.find(row => row.id === selectedId) ?? null;
+  const runParentId = summary?.origin?.kind === 'worker' ? summary.origin.fromSessionId : selectedId;
+  const workerSessions = runParentId
+    ? sessions.filter(row => row.origin?.kind === 'worker' && row.origin.fromSessionId === runParentId)
+    : [];
+  const queued = [
+    ...pendingComposerInputs,
+    ...[...startingInputs.values()].filter(entry => !pendingComposerInputs.some(row => row.id === entry.id))
+  ];
+  const model = confirmedComposerModel();
+  controlRail.update(projectControlRail({
+    state,
+    session: summary,
+    workerSessions,
+    events: summary && detailFor === summary.id ? events : [],
+    swarm,
+    queue: queued,
+    project: selectedWork() ?? null,
+    pressure: summary ? pressureOf(summary.id) : null,
+    working: summary ? sessionWorking(summary) : false,
+    blocked: !!summary?.conversationId && blockedChats.has(summary.conversationId),
+    currentModel: model ? { model: model.model, reasoningEffort: model.reasoningEffort } : null,
+    modelCatalog: chatModelCatalogSummary()
+  }));
+}
+
 function paintWorkbench(): void {
   if (!workbench) return;
   const chat = (row: SessionSummary): WorkbenchChat => ({
@@ -3433,15 +3481,27 @@ export function initChat(next: Deps): void {
   paintWorkbench();
   $('workRecipes').addEventListener('click', () => commandCenter?.open('actions', 'Prepare'));
   $('workContextLabel').addEventListener('click', () => { const project = selectedWork(); if (project) showProjectFiles(project, () => openOrganisedWork(project)); });
-  const agentToggle = el('button', 'btn btn-icon', '◫') as HTMLButtonElement;
-  agentToggle.id = 'agentPanelToggle'; agentToggle.type = 'button'; agentToggle.hidden = true;
-  agentToggle.setAttribute('aria-label', 'Toggle sub-agent side panel'); agentToggle.setAttribute('aria-expanded', 'false');
-  $('themeBtn').before(agentToggle);
-  const agentToolGroups = new Map<string, HTMLDetailsElement>();
-  agentPanel = createAgentPanel({
-    host: document.querySelector<HTMLElement>('[data-panel="chat"]')!, toggle: agentToggle,
-    load: id => run(api.getSession(id, { limit: 160 })), openMain: selectSession, working: sessionWorking,
-    render: (source, id, current) => {
+  const railToolGroups = new Map<string, HTMLDetailsElement>();
+  controlRail = createControlRail({
+    host: document.querySelector<HTMLElement>('.app')!,
+    toggle: $<HTMLButtonElement>('controlRailToggle'),
+    loadWorker: id => run(api.getSession(id, { limit: 160 })),
+    openMain: id => { pendingNewInput = null; selectSession(id); },
+    copyPath: path => run(api.writeClipboard(path)),
+    actions: {
+      newTask: () => { const project = selectedWork(); selectNewChat(project?.id ?? null); },
+      commands: () => commandCenter?.open(),
+      projectFiles: () => {
+        const project = selectedWork();
+        if (!project) { toast('Select a project first.'); return; }
+        showProjectFiles(project, () => openOrganisedWork(project));
+      },
+      activity: () => deps.navigate?.('activity'),
+      openChat: () => { if (selectedId) void run(api.openSessionChat(selectedId)); },
+      refreshModels: () => $<HTMLButtonElement>('refreshComposerModels').click(),
+      setup: () => deps.navigate?.('setup')
+    },
+    renderWorker: (source, id, current) => {
       let boundary = '';
       const rows = boundedTimeline(source).shown.flatMap(event => {
         if (!['tool_call', 'page_tool', 'agent_message'].includes(event.kind)) boundary = `event:${event.seq}`;
@@ -3450,12 +3510,14 @@ export function initChat(next: Deps): void {
         row.dataset.timelineKey = `event:${event.seq}`; row.dataset.activityBoundary = boundary;
         body.append(eventBody(event, { id, current })); row.append(body); return [row];
       });
-      return groupToolRows(rows, `pane:${id}`, agentToolGroups);
+      return groupToolRows(rows, `rail:${id}`, railToolGroups);
     }
   });
+  updateControlRail();
   initChatModels(() => {
     const config = deps.state()?.config;
     if (config) paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
+    updateControlRail();
   });
   $('queueAtFinish').addEventListener('click', () => {
     if ($('queueAtFinish').hidden) return;

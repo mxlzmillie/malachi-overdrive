@@ -22,6 +22,7 @@ const {
   resetSecretsCacheForTests,
   secureStorageCiphertextIsProtected,
   secureStorageStatus,
+  startupSecretSnapshot,
   setSecret
 } = await import('../src/main/secrets.js');
 const { safeStorage } = await import('electron');
@@ -49,6 +50,29 @@ afterEach(async () => {
 });
 
 describe('secret store', () => {
+  it('lets startup render an actionable state when macOS Keychain never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockImplementationOnce(() => new Promise(() => {}));
+      const snapshot = startupSecretSnapshot('darwin', 25);
+      await vi.advanceTimersByTimeAsync(25);
+      expect(await snapshot).toMatchObject({
+        secureStorage: { available: false, detail: expect.stringMatching(/Keychain.*restart MALACHI OVERDRIVE/) },
+        hasApiKey: false, hasGoalKey: false
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports stored key presence when the OS credential store answers', async () => {
+    await setSecret('openaiApiKey', 'fixture-key');
+    expect(await startupSecretSnapshot('darwin')).toMatchObject({
+      secureStorage: { available: true }, hasApiKey: true, hasGoalKey: false,
+      hasAtxpConnection: false, hasCustomProviderKey: false
+    });
+  });
+
   it('refuses Linux v10 hard-coded-key ciphertext instead of trusting the legacy backend label', async () => {
     vi.mocked(safeStorage.getSelectedStorageBackend).mockReturnValue('basic_text');
     vi.mocked(safeStorage.encryptStringAsync).mockResolvedValueOnce(Buffer.from('v10fallback-ciphertext', 'ascii'));

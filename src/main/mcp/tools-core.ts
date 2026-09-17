@@ -32,7 +32,7 @@ import {
   viewImage
 } from '../codex/view-image.js';
 import { logInfo, logWarn } from '../logger.js';
-import { SandboxError, isNativeWindowsPath, resolvePath, strayVirtualPath } from '../sandbox.js';
+import { SandboxError, isContained, isNativeWindowsPath, resolvePath, strayVirtualPath } from '../sandbox.js';
 import { currentWorkspace } from '../workspace.js';
 import type { Capabilities, Root } from '../../shared/types.js';
 import type { FileChange } from '../../shared/session.js';
@@ -302,7 +302,14 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           } catch {
             return fail('preview failed: the folder does not contain index.html.');
           }
-          const url = await startPreview(resolved.real);
+          const url = await startPreview(resolved.real, async () => {
+            const live = ctx.liveContext?.() ?? ctx;
+            if (!live.caps.read) return false;
+            try {
+              const stillApproved = await resolvePath(live.roots, resolved.real);
+              return isContained(resolved.real, stillApproved.real) && isContained(stillApproved.real, resolved.real);
+            } catch { return false; }
+          });
           noteDetail(resolved.virtual);
           return {
             content: [{ type: 'text' as const, text: `Preview ready: [Open preview](${url})\nShow this preview link in your reply.` }],

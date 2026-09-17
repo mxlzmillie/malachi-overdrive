@@ -17,7 +17,7 @@ function directory(): string {
   return path.join(path.dirname(root), 'input-attachments');
 }
 function fileFor(id: string): string { return path.join(directory(), z.string().uuid().parse(id)); }
-/** Only explicit file selection, drop or clipboard paste writes here; bytes never inflate the durable outbox. */
+/** User files and oversized browser requests stage here; bytes never inflate the durable outbox. */
 let staging: Promise<unknown> = Promise.resolve();
 export type AttachmentSource = string | { text: string } | { name: string; bytes: Uint8Array };
 export function stageInputAttachment(source: AttachmentSource, retained: Set<string>): Promise<InputAttachment> {

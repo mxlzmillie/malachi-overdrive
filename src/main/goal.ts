@@ -148,20 +148,29 @@ const REQUEST_TIMEOUT_MS = 180_000;
 /**
  * Failures that asking again cannot answer, whoever asks and however long they wait.
  *
- * A key that is refused, an account with no credit, a model id OpenRouter does not know and a
- * chat with nothing to continue from are all settings, not weather. Everything else — the
- * provider erroring, a stream cut short, a timeout, an answer in a shape this app cannot read —
- * is the same request having a bad moment, and it is asked again.
+ * A key that is refused, an account with no credit, an explicit provider rate limit, a model id
+ * the provider does not know and a chat with nothing to continue from are all boundaries the app
+ * must not try to push through automatically. Transport/server failures, a cut stream, a timeout
+ * or an answer in a shape this app cannot read can still be transient and may be asked again.
  *
  * Nothing in this module acts on that distinction: one draft is one request, and asking again
  * belongs to the page's Goal loop, which is the only place that can tell whether the turn is
  * still the one being answered. This is what that loop reads, published as `retryable`.
  */
-const SETTLED_FAILURE = /^(?:auth_rejected|out_of_credit|unknown_model|no_api_key|no_conversation|no_objective|invalid_provider|goal_marker_missing|goal_browser_cancelled|goal_browser_send_unconfirmed|goal_browser_send_failed)(?:$|:)/;
+const SETTLED_FAILURE = /^(?:auth_rejected|out_of_credit|rate_limited|unknown_model|no_api_key|no_conversation|no_objective|invalid_provider|goal_marker_missing|goal_browser_cancelled|goal_browser_send_unconfirmed|goal_browser_send_failed)(?:$|:)/;
 
 /** One failure classification shared by ordinary drafts and the conversation-less opening request. */
 function retryableGoalFailure(error: string): boolean {
-  return !SETTLED_FAILURE.test(error);
+  if (SETTLED_FAILURE.test(error)) return false;
+  // A generic 4xx is a malformed/forbidden request, not a temporary provider outage.
+  // Leaving e.g. http_400 retryable made the page's Goal loop ask the same bad request
+  // indefinitely. 408 and 425 are the two transient client-status exceptions.
+  const status = /^http_(\d{3})(?:$|:)/.exec(error);
+  if (status) {
+    const code = Number(status[1]);
+    if (code >= 400 && code < 500 && code !== 408 && code !== 425) return false;
+  }
+  return true;
 }
 /** The catalogue is UI data; a dead provider must not leave the picker request hanging forever. */
 const MODEL_LIST_TIMEOUT_MS = 30_000;

@@ -52,11 +52,13 @@ import { runDiagnostics } from './diagnostics.js';
 import { formatLogAsJson, formatLogForClipboard, getLog, logInfo, onLog } from './logger.js';
 import { RESERVED_ROOT_NAMES, uniqueRootName, validateNewRoot, SandboxError, resolvePath } from './sandbox.js';
 import { addProject, listProjects } from './projects.js';
-import { hasSecret, isEncryptionAvailable, secureStorageStatus, setSecret } from './secrets.js';
+import { isEncryptionAvailable, setSecret, startupSecretSnapshot } from './secrets.js';
 import { bundledVersion, locateBinary } from './tunnel/locate.js';
 import { TUNNEL_ID_PATTERN } from './tunnel/index.js';
 import {
+  bridgePairingCode,
   bridgeStatus,
+  bridgeStatusWithoutCredentials,
   sessionActivityExpiresAt,
   sessionHasInputActivity,
   sessionControlsFor, stopSessionTurn, setSessionAutomation, setSessionObjective, compactSession, cancelSessionCompaction,
@@ -346,19 +348,16 @@ function resolvedBinary(config: Config): string | null {
 
 async function buildState(): Promise<AppState> {
   const config = getConfig();
+  const credentials = await startupSecretSnapshot();
   return {
     config,
     status: getStatus(),
     platform: hostPlatformInfo(),
     loginStartupAvailable: supportsLoginStartup(process.platform, app.isPackaged),
-    secureStorage: await secureStorageStatus(),
-    hasApiKey: await hasSecret('openaiApiKey'),
-    hasGoalKey: await hasSecret('openRouterApiKey'),
-    hasAtxpConnection: await hasSecret('atxpConnection'),
-    hasCustomProviderKey: await hasSecret('customProviderApiKey'),
+    ...credentials,
     resolvedBinary: resolvedBinary(config),
     bundledTunnelVersion: bundledVersion(),
-    bridge: await bridgeStatus(),
+    bridge: credentials.secureStorage.available ? await bridgeStatus() : bridgeStatusWithoutCredentials(),
     update: updateStatus(),
     desktopAccess: getMacOSDesktopAccess()
   };
@@ -958,6 +957,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     await unpair();
     return buildState();
   });
+  // Shown only in the local app window; never served on loopback or sent to ChatGPT.
+  handle('bridge:pairingCode', async () => bridgePairingCode());
 
   handle('bridge:downloadExtension', async () => {
     // This is a recovery path for the extension bundled with *this installed app*. Never use

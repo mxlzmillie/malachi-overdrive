@@ -5,6 +5,7 @@
     <title>MALACHI OVERDRIVE</title>
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./command-center.css" />
+    <link rel="stylesheet" href="./control-rail.css" />
   </head>
   <body>
     <!-- Icon sprite. Inline so there is no request and no font, and every glyph
@@ -136,6 +137,9 @@
           <span id="headerSub">PRIVATE BUILD · STANDBY</span>
         </span>
         <span class="state">
+          <button class="btn btn-icon" id="controlRailToggle" type="button" title="Open Control Rail" aria-label="Open Control Rail" aria-expanded="false">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M14 4v16M17 8h2M17 12h2M17 16h2" /></svg>
+          </button>
           <button class="btn btn-icon" id="themeBtn" type="button" title="Switch to dark mode">
             <svg class="ico" viewBox="0 0 24 24"><use href="#i-moon" id="themeIcon" /></svg>
           </button>
@@ -496,9 +500,11 @@
                   <h3>Add the Chrome extension</h3>
                   <p>
                     Open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>,
-                    choose <strong>Load unpacked</strong> and pick the folder the button opens. It
-                    pairs with this app by itself — there is no code to type.
+                    choose <strong>Load unpacked</strong> and pick the folder the button opens. Then
+                    open its popup and enter the pairing code shown below. This proves the
+                    companion belongs to the local user before it can read chat activity.
                   </p>
+                  <p class="hint">Pairing code: <strong id="bridgePairingCode">Loading…</strong> · Enter it in the companion popup. A new code appears after each successful pairing or disconnect.</p>
                   <p class="hint is-required">
                     <strong>Required for sub-agents:</strong> the companion extension must be loaded
                     and connected in ChatGPT. Without it, MALACHI OVERDRIVE cannot identify, open or

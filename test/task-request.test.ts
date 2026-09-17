@@ -5,10 +5,10 @@ afterEach(() => vi.useRealTimers());
 
 it('keeps a caller-owned operation retrying every fifteen seconds until it succeeds', async () => {
   vi.useFakeTimers();
-  const work = vi.fn().mockRejectedValueOnce(new TaskRequestError('rate_limited', true))
+  const work = vi.fn().mockRejectedValueOnce(new TaskRequestError('request_failed: socket closed', true))
     .mockRejectedValueOnce(new TaskRequestError('http_503', true))
-    .mockRejectedValueOnce(new TaskRequestError('rate_limited', true))
-    .mockRejectedValueOnce(new TaskRequestError('rate_limited', true)).mockResolvedValue('ready');
+    .mockRejectedValueOnce(new TaskRequestError('http_502', true))
+    .mockRejectedValueOnce(new TaskRequestError('timeout_or_cancelled', true)).mockResolvedValue('ready');
   const result = retryTaskRequest(work, new AbortController().signal, vi.fn());
   await vi.advanceTimersByTimeAsync(59999);
   expect(work).toHaveBeenCalledTimes(4);
@@ -20,7 +20,7 @@ it('keeps a caller-owned operation retrying every fifteen seconds until it succe
 it('honors Retry-After beyond the native timer range without immediate retries', async () => {
   vi.useFakeTimers();
   const delay = 30 * 24 * 60 * 60 * 1000;
-  const work = vi.fn().mockRejectedValueOnce(new TaskRequestError('rate_limited', true, delay)).mockResolvedValue('ready');
+  const work = vi.fn().mockRejectedValueOnce(new TaskRequestError('http_503', true, delay)).mockResolvedValue('ready');
   const result = retryTaskRequest(work, new AbortController().signal, vi.fn());
   await vi.advanceTimersByTimeAsync(delay - 1);
   expect(work).toHaveBeenCalledTimes(1);
@@ -31,7 +31,7 @@ it('honors Retry-After beyond the native timer range without immediate retries',
 
 it('honors Retry-After, coalesces the same invocation and never retries a successful result', async () => {
   vi.useFakeTimers(); const id = randomUUID(), progress = vi.fn();
-  const work = vi.fn().mockRejectedValueOnce(new TaskRequestError('rate_limited', true, 30000)).mockResolvedValue('validated');
+  const work = vi.fn().mockRejectedValueOnce(new TaskRequestError('http_503', true, 30000)).mockResolvedValue('validated');
   const result = runTaskRequest(id, 'same task', work, progress);
   expect(runTaskRequest(id, 'same task', work, progress)).toBe(result);
   await vi.advanceTimersByTimeAsync(29999); expect(work).toHaveBeenCalledTimes(1);
@@ -61,14 +61,17 @@ it('cancels a retry wait without another attempt and aborts an active provider s
 
 it('bounds transient retries and never retries terminal/ambiguous failures', async () => {
   vi.useFakeTimers(); const progress = vi.fn();
-  const work = vi.fn().mockRejectedValue(new TaskRequestError('rate_limited', true));
+  const work = vi.fn().mockRejectedValue(new TaskRequestError('http_503', true));
   const result = runTaskRequest(randomUUID(), 'task', work, progress); void result.catch(() => undefined);
-  await vi.runAllTimersAsync(); await expect(result).rejects.toThrow('rate_limited');
+  await vi.runAllTimersAsync(); await expect(result).rejects.toThrow('http_503');
   expect(work).toHaveBeenCalledTimes(3);
+  const limited = vi.fn().mockRejectedValue(new TaskRequestError('rate_limited: provider busy'));
+  await expect(runTaskRequest(randomUUID(), 'rate limit', limited, progress)).rejects.toThrow('rate_limited');
+  expect(limited).toHaveBeenCalledTimes(1);
   const refused = vi.fn().mockRejectedValue(new TaskRequestError('goal_browser_send_unconfirmed'));
   await expect(runTaskRequest(randomUUID(), 'browser', refused, progress)).rejects.toThrow('goal_browser_send_unconfirmed');
   expect(refused).toHaveBeenCalledTimes(1);
-  const delayed = vi.fn().mockRejectedValue(new TaskRequestError('rate_limited', true, 600000));
-  await expect(runTaskRequest(randomUUID(), 'long backoff', delayed, progress)).rejects.toThrow('rate_limited');
+  const delayed = vi.fn().mockRejectedValue(new TaskRequestError('http_503', true, 600000));
+  await expect(runTaskRequest(randomUUID(), 'long backoff', delayed, progress)).rejects.toThrow('http_503');
   expect(delayed).toHaveBeenCalledTimes(1);
 });

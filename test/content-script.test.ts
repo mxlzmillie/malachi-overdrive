@@ -13,6 +13,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { createHash, webcrypto } from 'node:crypto';
 import { JSDOM } from 'jsdom';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -538,6 +539,14 @@ describe('one synchronous page snapshot per observer turn', () => {
     expect(await live.runtimeMessage({ type: 'clf-prepare-desktop-input', id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' })).toEqual({ ready: false });
     expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('My unsent draft');
   });
+  it('does not recycle a chat whose Compact & Resume handoff is still active', async () => {
+    live = await harness(undefined, { activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0,
+      job: { sessionId: 's1', stage: 'opening', busy: true, handoffId: 'h1', error: null } } }) });
+    await settleTurn(live);
+    await live.hook.pullActivity();
+    expect(await live.runtimeMessage({ type: 'clf-input-reuse-state' })).toMatchObject({ safe: false });
+    expect(await live.runtimeMessage({ type: 'clf-prepare-desktop-input', id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' })).toEqual({ ready: false });
+  });
   it('permits retiring a hydrated empty catalog home with the real close proof', async () => {
     live = await harness('https://chatgpt.com/?cos-model-catalog=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
     await settle();
@@ -778,6 +787,18 @@ describe('desktop input delivery and helper ownership', () => {
     expect(click).not.toHaveBeenCalled();
     expect(live.sent.some(message => message.ack)).toBe(false);
     expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('');
+  });
+
+  it('proves a post-navigation receipt from one exact user bubble without dispatching Send again', async () => {
+    live = await harness(`https://chatgpt.com/c/${chatA}`);
+    Object.defineProperty(live.window.crypto, 'subtle', { value: webcrypto.subtle, configurable: true });
+    userTurn(live.document, 'recovered-user', 'Delivery check\nwith whitespace');
+    const proof = await live.runtimeMessage({ type: 'clf-confirm-input-receipt' });
+    expect(proof).toEqual({ ok: true, conversationId: chatA, messageId: 'm-recovered-user',
+      digest: createHash('sha256').update('Deliverycheckwithwhitespace').digest('hex') });
+    expect(live.sent.some(message => message.type === 'desktop_input')).toBe(false);
+    userTurn(live.document, 'another-user', 'Unrelated message');
+    expect(await live.runtimeMessage({ type: 'clf-confirm-input-receipt' })).toEqual({ ok: false });
   });
 
   it('ACKs a fresh input only under its accepted exact user message and assigned conversation', async () => {
@@ -13419,7 +13440,7 @@ describe('the goal loop', () => {
       return timer(fn, ms);
     }) as typeof held.window.setTimeout;
 
-    draft = { ...readyDraft(''), turnId, stage: 'failed', error: 'rate_limited: provider busy', retryable: true };
+    draft = { ...readyDraft(''), turnId, stage: 'failed', error: 'http_503: provider busy', retryable: true };
     await live.hook.pullActivity();
     await settle(800);
 
@@ -13459,7 +13480,7 @@ describe('the goal loop', () => {
       ...readyDraft(''),
       turnId: 'g-stale-without-obligation',
       stage: 'failed',
-      error: 'rate_limited: stale provider attempt',
+      error: 'http_503: stale provider attempt',
       retryable: true
     };
     await live.hook.pullActivity();
@@ -14611,7 +14632,7 @@ describe('the goal loop', () => {
     expect(bound[0]).toMatchObject({ conversationId: CHAT, text: 'rewrite the parser in rust' });
   });
 
-  it('retries a rate-limited New Chat opening and sends the successful answer once', async () => {
+  it('retries a transient New Chat opening and sends the successful answer once', async () => {
     let attempts = 0;
     live = await harness('https://chatgpt.com/', {
       settings_get: () => ({
@@ -14627,7 +14648,7 @@ describe('the goal loop', () => {
           ? {
               ok: false,
               status: 502,
-              data: { error: 'rate_limited: Provider returned error', retryable: true }
+              data: { error: 'http_503: Provider returned error', retryable: true }
             }
           : { ok: true, data: { reply: 'rewrite the parser in rust', model: MODEL } };
       }
@@ -14637,9 +14658,8 @@ describe('the goal loop', () => {
     live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
       startGenerating(live!.document);
     });
-    // The opening waits on the same quarter-minute clock as the in-chat loop, not on a
-    // one-second courtesy pause: a provider rate limit lasts longer than that, and a run
-    // started from an empty New Chat has no later turn to try again from.
+    // The opening waits on the same quarter-minute clock as the in-chat loop for a transient
+    // server failure; provider enforcement such as a 429 is non-retryable instead.
     const held = live;
     const timer = held.window.setTimeout;
     const wakes: Array<() => void> = [];
@@ -14661,7 +14681,7 @@ describe('the goal loop', () => {
     await settle(400);
 
     expect(attempts).toBe(1);
-    expect(wakes, 'a rate-limited opening waits for the Goal retry clock').toHaveLength(1);
+    expect(wakes, 'a transient opening waits for the Goal retry clock').toHaveLength(1);
     expect(live.document.body.textContent).toContain('Retrying Goal in 15 seconds');
     expect(live.document.body.textContent).not.toContain('The goal loop stopped');
     wakes[0]!();
@@ -14672,7 +14692,7 @@ describe('the goal loop', () => {
     expect(composerText(live.document)).toBe('rewrite the parser in rust');
   });
 
-  it('keeps retrying a New Chat opening past a rate limit that lasts several rounds', async () => {
+  it('keeps backing off a New Chat opening through repeated transient server failures', async () => {
     let attempts = 0;
     live = await harness('https://chatgpt.com/', {
       settings_get: () => ({
@@ -14685,7 +14705,7 @@ describe('the goal loop', () => {
       goal_open: () => {
         attempts += 1;
         return attempts < 5
-          ? { ok: false, status: 502, data: { error: 'rate_limited: Provider returned error', retryable: true } }
+          ? { ok: false, status: 502, data: { error: 'http_503: Provider returned error', retryable: true } }
           : { ok: true, data: { reply: 'build the city', model: MODEL } };
       }
     });
@@ -14720,6 +14740,46 @@ describe('the goal loop', () => {
     expect(attempts).toBe(5);
     expect(sends()).toBe(1);
     expect(composerText(live.document)).toBe('build the city');
+  });
+
+  it('surfaces a rate-limited New Chat opening without scheduling another provider request', async () => {
+    let attempts = 0;
+    live = await harness('https://chatgpt.com/', {
+      settings_get: () => ({
+        ok: true,
+        data: {
+          context: { auto: false, threshold: 400_000, warn: 400_000, limit: 533_000 },
+          goal: { enabled: false, hasKey: true, model: MODEL, objective: '', blocked: '' }
+        }
+      }),
+      goal_open: () => {
+        attempts += 1;
+        return { ok: false, status: 429, data: { error: 'rate_limited: Provider returned error', retryable: false, retryAfterMs: 37_000 } };
+      }
+    });
+    await live.hook.pullActivity();
+    const held = live;
+    const timer = held.window.setTimeout;
+    const wakes: Array<() => void> = [];
+    held.window.setTimeout = ((fn: () => void, ms?: number) => {
+      if (ms === held.hook.GOAL_RETRY_MS) {
+        wakes.push(fn);
+        return 0;
+      }
+      return timer(fn, ms);
+    }) as typeof held.window.setTimeout;
+    live.hook.injectControl();
+    live.hook.toggleMenu();
+    (live.document.querySelector('.clf-menu-goal-link') as HTMLButtonElement).click();
+    const box = live.document.querySelector('[data-clf-goal-input]') as HTMLTextAreaElement;
+    box.value = 'build the city';
+    box.dispatchEvent(new live.window.Event('input', { bubbles: true }));
+    (live.document.querySelector('.clf-menu-goal-save') as HTMLButtonElement).click();
+    await settle(800);
+
+    expect(attempts).toBe(1);
+    expect(wakes).toHaveLength(0);
+    expect(live.document.body.textContent).toContain('rate_limited: Provider returned error');
   });
 
   /**

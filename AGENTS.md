@@ -2524,12 +2524,12 @@ projection repair as session/workspace/swarm state.
 `/goal/open` covers the one moment with no conversation id yet. It does not persist an anonymous
 objective or stream a draft into nowhere: the page awaits the opening message, sends it through the
 real composer, then binds the objective once ChatGPT creates the concrete conversation.
-Transient provider/opening failures carry the same Goal-owned `retryable` classification as an
-ordinary draft; the page retries the opening on the same unbounded `GOAL_RETRY_MS` clock as an
-in-chat turn, only while it still proves the same empty New Chat holding the same goal — a rate
-limit outlives any short courtesy pause, and there is no later turn to retry from. Settled
-key/account/model failures and a model refusing to write the opening remain
-terminal, and no app-side retry continues after the page navigates away.
+Transient transport/server opening failures carry the same Goal-owned `retryable` classification
+as an ordinary draft; the page retries the opening on the Goal backoff clock only while it still
+proves the same empty New Chat holding the same goal. Provider enforcement is different: explicit
+rate limits join key/account/model failures as non-retryable boundaries, are surfaced to the user,
+and do not trigger another automatic provider request. A model refusing to write the opening also
+remains terminal, and no app-side retry continues after the page navigates away.
 This is the one extension→app request allowed to outlive the ordinary 10-second bridge request
 deadline: `background.js` gives it `MODEL_REQUEST_TIMEOUT_MS = 190s`, deliberately just beyond
 `goal.ts`'s own 180-second OpenRouter request ceiling. A local request timeout returns a retryable
@@ -2549,9 +2549,9 @@ on both `content.js` and the recorder/Goal durable obligation, not just adding a
 The page then applies an **eight-second four-signal settle** before it asks the app: final answer
 text stable, native/tool activity stable, ChatGPT generating control absent, and app-reported
 `runningToolCalls()` zero. The five-minute watch ceiling gives up visibly rather than converting
-ambiguity into a send. Retryable OpenRouter failures wait 15 seconds **outside** the Goal busy lock;
+ambiguity into a send. Retryable transport/server failures back off **outside** the Goal busy lock;
 holding the lock while sleeping would make a different turn that ends during the wait miss its
-only trigger edge.
+only trigger edge. `rate_limited` never enters that retry path.
 
 The exact Goal/Loop ownership chain is worth following once:
 
@@ -2658,11 +2658,11 @@ quiet, then 2/5/10/15 — and then stops for good. Load-bearing details:
   or browser opener to special-case historical A. Regress that commit leaves no A Goal repair and
   that B's first answer still gets exactly its ordinary/recovered Goal edge.
 - A failed draft leaves the obligation `pending` by design (`ackGoalDraft` discharges only on
-  `ready`/`no-reply`), but **not every failure is immediately retryable**. For transient/provider
-  failures outside `SETTLED_FAILURE`, the page ACKs that failed attempt and a same-turn
-  `startGoalDraft()` may create a fresh attempt; this is the path the page retries after 15 seconds
-  while the exact turn is still safe to act on. Settled account/settings failures
-  (`auth_rejected`, `out_of_credit`, `unknown_model`, `no_api_key`, `no_conversation`,
+  `ready`/`no-reply`), but **not every failure is immediately retryable**. For transient transport
+  or server failures outside `SETTLED_FAILURE`, the page ACKs that failed attempt and a same-turn
+  `startGoalDraft()` may create a fresh attempt; this is the path the page backs off on while the
+  exact turn is still safe to act on. Settled provider/account/settings failures
+  (`auth_rejected`, `out_of_credit`, `rate_limited`, `unknown_model`, `no_api_key`, `no_conversation`,
   `no_objective`) return `retryable:false` and the acknowledged same-turn request keeps returning
   that failed draft instead of paying the provider again. The durable reply obligation remains
   pending in both cases. After the draft payload's 10-minute TTL, `expireDraftPayload()` clears the

@@ -2,6 +2,7 @@
 
 import http from 'node:http';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { rawPromises as fs } from './rawfs.js';
 import { isContained } from './sandbox.js';
 
@@ -55,12 +56,17 @@ async function fileForRequest(root: string, requestUrl: string): Promise<string 
 }
 
 /** Start one loopback-only server per folder, and reuse it for later preview calls. */
-export async function startPreview(root: string): Promise<string> {
+export async function startPreview(root: string, allowed: () => Promise<boolean>): Promise<string> {
   const canonical = await fs.realpath(root);
   const stat = await fs.stat(canonical);
   if (!stat.isDirectory()) throw new Error('Preview path must be a folder');
   const current = previews.get(canonical);
   if (current) return current.url;
+
+  // The first navigation carries this unguessable path component. A cookie keeps absolute
+  // asset URLs working afterwards without exposing a public unauthenticated root URL.
+  const secret = randomBytes(32).toString('base64url');
+  const prefix = `/${secret}`;
 
   const server = http.createServer((req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -72,7 +78,16 @@ export async function startPreview(root: string): Promise<string> {
       response(res, 403, 'Loopback only');
       return;
     }
-    void fileForRequest(canonical, req.url ?? '/').then(async (file) => {
+    let pathname: string;
+    try { pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname; }
+    catch { response(res, 400, 'Bad request'); return; }
+    const byPath = pathname === prefix || pathname.startsWith(`${prefix}/`);
+    const byCookie = (req.headers.cookie ?? '').split(';').some(cookie => cookie.trim() === `overdrive_preview=${secret}`);
+    if (!byPath && !byCookie) { response(res, 403, 'Preview access required'); return; }
+    const fileUrl = byPath ? (req.url ?? '/').replace(prefix, '') || '/' : req.url ?? '/';
+    void allowed().then(async (isAllowed) => {
+      if (!isAllowed) { response(res, 403, 'Preview permission revoked'); return; }
+      const file = await fileForRequest(canonical, fileUrl);
       if (!file) {
         response(res, 404, 'Not found');
         return;
@@ -82,7 +97,9 @@ export async function startPreview(root: string): Promise<string> {
         'content-type': CONTENT_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
         'content-length': body.byteLength,
         'cache-control': 'no-store',
-        'x-content-type-options': 'nosniff'
+        'x-content-type-options': 'nosniff',
+        'referrer-policy': 'no-referrer',
+        ...(byPath ? { 'set-cookie': `overdrive_preview=${secret}; HttpOnly; SameSite=Strict; Path=/` } : {})
       });
       res.end(req.method === 'HEAD' ? undefined : body);
     }).catch(() => response(res, 500, 'Preview failed'));
@@ -97,7 +114,7 @@ export async function startPreview(root: string): Promise<string> {
     server.close();
     throw new Error('Preview server did not receive a port');
   }
-  const url = `http://127.0.0.1:${address.port}/`;
+  const url = `http://127.0.0.1:${address.port}${prefix}/`;
   previews.set(canonical, { server, url });
   return url;
 }

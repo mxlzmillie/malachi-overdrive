@@ -22,9 +22,8 @@ import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindB
  *
  * What keeps it safe:
  *   · 127.0.0.1 only, never 0.0.0.0
- *   · the only unauthenticated routes are /hello (a fixed identifying string) and
- *     /pair, which issues the token to a caller on 127.0.0.1 — see the route for what
- *     that deliberately does and does not buy
+ *   · /hello identifies the app; /pair requires the one-time code shown only in the
+ *     app window before it issues or rotates a token, because loopback spans OS users
  *   · every other route needs the bearer token issued by /pair, compared in
  *     constant time, and stored encrypted rather than in config.json
  *   · the Origin must be a chrome-extension:// origin, so a web page cannot drive it
@@ -35,7 +34,7 @@ import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindB
  * cannot read a file, run anything, or change a permission.
  */
 
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import type { BridgeStatus } from '../shared/types.js';
 import { CHAT_SILENCE_MS, CONTINUATION_MARKER, isReasoningEffort, type ReasoningEffort, type SessionEvent, type SessionOrigin } from '../shared/session.js';
@@ -544,6 +543,12 @@ let requestWindow = { start: Date.now(), count: 0 };
 const listeners = new Set<() => void>();
 let extensionVersion: string | null = null;
 let versionWarned = false;
+/** App-window-only proof for first pairing and for reconnecting after revocation. */
+let pairingProof = randomBytes(6).toString('hex').toUpperCase();
+
+export function bridgePairingCode(): string {
+  return `${pairingProof.slice(0, 6)}-${pairingProof.slice(6)}`;
+}
 
 export function onBridgeChange(listener: () => void): () => void {
   listeners.add(listener);
@@ -560,6 +565,18 @@ export async function bridgeStatus(): Promise<BridgeStatus> {
     running: server !== null,
     port,
     paired: stored !== null && stored !== BROWSER_DISCONNECTED,
+    present: browserPresent(),
+    lastSeenAt,
+    extensionVersion
+  };
+}
+
+/** Non-credential fallback while an OS keyring prompt blocks the startup status request. */
+export function bridgeStatusWithoutCredentials(): BridgeStatus {
+  return {
+    running: server !== null,
+    port,
+    paired: false,
     present: browserPresent(),
     lastSeenAt,
     extensionVersion
@@ -610,6 +627,7 @@ export async function unpair(): Promise<void> {
   // This impossible-as-a-token sentinel preserves the user's explicit intent across both
   // the extension's next poll and an app restart.
   await setSecret('bridgeToken', BROWSER_DISCONNECTED);
+  pairingProof = randomBytes(6).toString('hex').toUpperCase();
   browserWake?.revoke();
   logInfo('bridge: browser disconnected');
   changed();
@@ -1353,6 +1371,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if ((await browserDisconnected()) && !reconnect) {
       return json(res, 409, { error: 'browser_disconnected' }, origin);
     }
+    const supplied = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>)['code'] : null;
+    const proof = typeof supplied === 'string' ? supplied.replace(/[\s-]/g, '').toUpperCase() : '';
+    if (!safeEqual(proof, pairingProof)) {
+      return json(res, 403, { error: 'pairing_code_required', message: 'Enter the current pairing code shown in MALACHI OVERDRIVE → Setup → Browser in the companion popup.' }, origin);
+    }
     const storage = await secureStorageStatus();
     if (!storage.available) {
       return json(
@@ -1362,19 +1385,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         origin
       );
     }
-    // Silent provisioning on loopback.
-    //
-    // There used to be a six-digit code here, so the user had to be looking at the app
-    // before a browser could attach. In practice both halves are the same person on the
-    // same machine, installed together, and the code was a step that failed far more
-    // often than it protected anything — the app was unreachable and the user was typing
-    // numbers. The bearer token is still real and still required on every other route; it
-    // is simply issued to whoever asks on 127.0.0.1 rather than to whoever can read the
-    // window. What that gives up is stated plainly: any program already running as this
-    // user can obtain the token, and with it read recorded ChatGPT activity and queue an
-    // "open a fresh chat" command. It can still not read a file, run anything, or change
-    // a permission — the bridge has no route that does. A web page cannot: originOf
-    // refuses anything that is not a chrome-extension:// origin, above.
+    // Loopback is host-wide, not OS-user-wide. Consume the app-visible one-time proof
+    // before the async credential write so simultaneous callers cannot both redeem it.
+    pairingProof = randomBytes(6).toString('hex').toUpperCase();
     const token = randomBytes(32).toString('base64url');
     await setSecret('bridgeToken', token);
     noteBrowserSeen();
@@ -1469,6 +1482,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         modelCatalogRequest: pendingChatModelRequest(),
         pluginRefreshRequests: getConfig().ui.autoRefreshPlugins === true ? pluginRefreshPublications().map(({ surface, schemaId, connectorName }) => ({ surface, schemaId, connectorName })) : [],
         browserPreferenceRequest: pendingBrowserPreferenceRequest(),
+        // A fresh opening may replace its document after ChatGPT accepts Send. Give
+        // the elected tab a receipt-only proof, never a second copy of the prompt.
+        inputReceipts: inputRows.filter(row => row.purpose !== 'decision' && !row.lifetime && !row.sessionId && !row.conversationId && row.owner &&
+          row.sendAuthorizedAt && !row.deliveredAt && row.deliveryText &&
+          ['browser', 'cancelled'].includes(row.state) && Date.now() - row.sendAuthorizedAt < 3_600_000)
+          .map(row => ({ id: row.id, owner: row.owner,
+            digest: createHash('sha256').update(row.deliveryText!.replace(/\s+/g, '')).digest('hex') })),
         inputOpeningIds: inputRows.filter(row => !['sent', 'failed', 'cancelled'].includes(row.state)).map(row => row.id),
         inputs: [...(await pendingBrowserInputs()).filter(input => !input.conversationId || runningToolCalls(input.conversationId) === 0),
           ...inputRows.filter(row => row.lifetime === 'temporary-planner' && ['sent', 'cancelled', 'failed'].includes(row.state))
@@ -2628,10 +2648,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const turnId = typeof body['turnId'] === 'string' ? body['turnId'].slice(0, 200) : '';
     const terminalRequired = body['terminalRequired'] === true;
     // The page asking is the pickup the owed-reply watchdog is waiting for, whatever the
-    // provider then says. On 2026-09-02 OpenRouter answered ten drafts in a row with 429 and the
-    // page retried every fifteen seconds, alive the whole time; the watchdog only saw a reply
-    // still owed after two minutes and reloaded the chat twice for a page that was never dead.
-    // A reload cannot fix a rate limit, so each request pushes the reload out instead.
+    // provider then says. A provider refusal must not be misdiagnosed as a dead page: explicit
+    // rate limits are now surfaced as non-retryable and a reload cannot fix them. Ordinary
+    // transient transport/server attempts still count as page activity while they are alive.
     if (id) noteGoalWatchActivity(id);
     const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
@@ -2725,7 +2744,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     // The page has crossed the semantic boundary: this exact completed ChatGPT turn is owed
     // one Goal decision. Its local id is provisional until the recorder delivers the stable
-    // assistant id; a 429, app restart or page reload may discard an attempt, never this row.
+    // assistant id; a provider refusal, app restart or page reload may discard an attempt, never
+    // this row. Keeping the obligation does not authorize another request against a rate limit.
     try {
       await acceptGoalReplyNow({
         conversationId: id,
@@ -7755,6 +7775,7 @@ export function resetBridgeForTests(): void {
   lastSeenAt = null;
   extensionVersion = null;
   versionWarned = false;
+  pairingProof = randomBytes(6).toString('hex').toUpperCase();
   requestWindow = { start: Date.now(), count: 0 };
 }
 

@@ -183,6 +183,7 @@ const api = {
   getHandoff: (id: string, handoffId?: string) => call<Handoff | null>('handoff:get', { id, handoffId }),
 
   unpairExtension: () => call<AppState>('bridge:unpair'),
+  bridgePairingCode: () => call<string>('bridge:pairingCode'),
   downloadExtension: () => call<boolean>('bridge:downloadExtension'),
   // The renderer can ask where the extension is and ask for it to be opened, but the
   // path it gets back is only ever displayed: the open happens in the main process

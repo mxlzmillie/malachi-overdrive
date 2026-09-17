@@ -8,8 +8,8 @@
  * https://chatgpt.com origin), and there is no message that makes the app touch a
  * file, run a command or change a permission.
  *
- * Discovery is a scan of five fixed loopback ports for a /hello that identifies the
- * app. Nothing is broadcast and nothing listens.
+ * Discovery scans five fixed loopback ports for /hello. Pairing then requires the
+ * one-time code the user reads in the app window; loopback alone does not prove OS user.
  *
  * This worker also owns the observation journal. A content script lives only as long as
  * its page: a reload, a navigation or a crash takes its memory with it, and ChatGPT
@@ -40,7 +40,7 @@ const MODEL_REQUEST_TIMEOUT_MS = 190_000;
 /** The reason a deadline aborts with, so it is a fact the caller can act on rather than prose. */
 const TIMED_OUT = 'the app took too long to answer';
 /** Bumped only when the request/response shape changes; the app compares it. */
-const BRIDGE_PROTOCOL = 13;
+const BRIDGE_PROTOCOL = 14;
 
 /**
  * Journal caps. The byte figure is what actually matters — chrome.storage.session has a
@@ -127,6 +127,8 @@ let pairingEpoch = -1;
 let pairingReconnect = false;
 /** Most recent pairing failure, for the popup. Process-local and never a credential. */
 let pairingError = null;
+/** A failed silent handshake is not a reason to ask the app again on every poll. */
+let pairingCodeNeeded = false;
 
 /**
  * When the app was last confirmed to be on `port`, and how long that is believed for.
@@ -975,8 +977,7 @@ async function call(path, init = {}, retried = false) {
     // Somebody disconnected this browser on purpose. Quietly getting a new token here is
     // how "Disconnect" came to mean "disconnect until the next poll".
     if (disconnected) return { ok: false, status: 401, error: 'disconnected' };
-    // First use. Ask the app for a token instead of asking the user for one — see
-    // provision() for why that is not a downgrade.
+    // First use probes once; later polls wait for the app-window code in the popup.
     const got = await provision();
     if (!got.ok) return { ok: false, status: 401, error: got.error || 'not_paired' };
   }
@@ -1029,19 +1030,9 @@ async function call(path, init = {}, retried = false) {
   }
 }
 
-/**
- * Gets this browser a bearer token, with nothing for the user to type.
- *
- * There used to be a six-digit code shown in the app and entered in the extension popup.
- * It bought nothing: the only callers that can reach the app at all are already on this
- * machine's loopback interface — the app refuses any web origin outright — so the code
- * was asking the user to prove something the network had already proved. What it did cost
- * was the first-run path, which failed until somebody found the popup.
- *
- * The token itself stays: it is what keeps a second local program from driving the bridge
- * by accident, and it is why the marker in a chat URL is harmless on its own.
- */
-function provision(reconnect = false) {
+/** Obtain a bearer token only after the user supplies the app-window pairing code. */
+function provision(reconnect = false, code = null) {
+  if (!reconnect && pairingCodeNeeded) return Promise.resolve({ ok: false, error: 'pairing_code_required', message: 'Enter the pairing code shown in MALACHI OVERDRIVE → Setup → Browser.' });
   // Singleflight. Everything that wants a token waits on the same request: `/pair` mints
   // a fresh credential and invalidates the one before it, so two concurrent callers do
   // not get two tokens, they get one working token and one that has already been revoked.
@@ -1050,7 +1041,9 @@ function provision(reconnect = false) {
   // under the new intent without waiting for/accepting that stale result.
   const intent = connectionEpoch;
   if (pairing && pairingEpoch === intent && pairingReconnect === reconnect) return pairing;
-  const work = pairOnce(intent, reconnect).then((result) => {
+  const work = pairOnce(intent, reconnect, code).then((result) => {
+    if (result?.ok) pairingCodeNeeded = false;
+    else if (result?.error === 'pairing_code_required') pairingCodeNeeded = true;
     pairingError = result && result.ok
       ? null
       : {
@@ -1072,7 +1065,7 @@ function provision(reconnect = false) {
   return tracked;
 }
 
-async function pairOnce(intent = connectionEpoch, reconnect = false) {
+async function pairOnce(intent = connectionEpoch, reconnect = false, code = null) {
   const found = await discover(true);
   if (!found) return { ok: false, error: 'app_not_found' };
   if (found.compatible === false) return { ok: false, error: 'incompatible_extension' };
@@ -1081,7 +1074,7 @@ async function pairOnce(intent = connectionEpoch, reconnect = false) {
       method: 'POST',
       cache: 'no-store',
       headers: { 'content-type': 'application/json', ...versionHeaders() },
-      body: JSON.stringify(reconnect ? { reconnect: true } : {})
+      body: JSON.stringify({ ...(reconnect ? { reconnect: true } : {}), ...(code ? { code } : {}) })
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || typeof data.token !== 'string') {
@@ -1724,6 +1717,34 @@ async function createChatTab(url, background = false, active = !background) {
 // Delivery receipt observation belongs to one elected input, not the shared
 // maintenance flight. A slow 120-second receipt must not starve other chats.
 const desktopInputOffers = new Set();
+const desktopReceiptChecks = new Set();
+async function confirmDesktopInputReceipts(receipts, retirementCurrent = () => true) {
+  if (!Array.isArray(receipts)) return;
+  for (const receipt of receipts.slice(0, 50)) {
+    if (!retirementCurrent() || !/^[a-f0-9-]{36}$/i.test(receipt?.id) ||
+        !/^[a-f0-9]{64}$/i.test(receipt?.digest) || typeof receipt?.owner !== 'string' ||
+        !/^\d+:[^:]{1,256}:\d+$/.test(receipt.owner) || desktopReceiptChecks.has(receipt.id)) continue;
+    const tabId = Number(receipt.owner.split(':', 1)[0]);
+    if (!Number.isSafeInteger(tabId)) continue;
+    desktopReceiptChecks.add(receipt.id);
+    try {
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      const conversationId = tab && !tab.pendingUrl ? conversationForTab(tab) : null;
+      if (!conversationId || !retirementCurrent()) continue;
+      let timer;
+      const proof = await Promise.race([
+        chrome.tabs.sendMessage(tabId, { type: 'clf-confirm-input-receipt' }).catch(() => null),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), 3000); })
+      ]).finally(() => clearTimeout(timer));
+      const current = await chrome.tabs.get(tabId).catch(() => null);
+      if (!retirementCurrent() || proof?.ok !== true || proof.conversationId !== conversationId ||
+          proof.digest !== receipt.digest || !proof.messageId || !current || current.pendingUrl ||
+          conversationForTab(current) !== conversationId) continue;
+      await ackDesktopInput(receipt.id, receipt.owner, conversationId, proof.messageId);
+    } catch { /* Leave the original claim spent; the next maintenance pass may retry its receipt only. */
+    } finally { desktopReceiptChecks.delete(receipt.id); }
+  }
+}
 function inputTabStillMatches(tab, message) {
   const target = cleanConversationId(message?.conversationId);
   if (target) return conversationForTab(tab) === target;
@@ -2267,6 +2288,9 @@ async function maintainOnce() {
   inspectRequestedModels(reply.data.modelCatalogRequest);
   inspectRequestedPluginRefresh(reply.data.pluginRefreshRequests, reply.data.background === true, reply.data.browserOnly === true);
   await deliverDesktopInputs(reply.data.inputs, reply.data.background === true, reply.data.reusableConversations, reply.data.inputOpeningIds, retirementCurrent);
+  // Receipt recovery must not hold shared maintenance or other chats behind a
+  // suspended document. Each original input remains fenced by its in-flight set.
+  void confirmDesktopInputReceipts(reply.data.inputReceipts, retirementCurrent).catch(() => undefined);
   if (!backgroundReady) await reconcileBackgroundWindow(reply.data);
   const monitoring = reply.data.recoveryMonitoring === true;
   if (monitoring !== recoveryMonitoring) {
@@ -2644,13 +2668,13 @@ const HANDLERS = {
       ...(pairingError ? { pairError: pairingError } : {})
     };
   },
-  async pair() {
+  async pair(message) {
     await load();
     // This message exists only behind the popup's Connect/Retry control. Advance the intent
     // generation so an older silent provision already on the wire cannot win after this
-    // explicit reconnect, then tell the app this /pair is allowed to clear its durable latch.
+    // explicit reconnect with the app-window code, then tell the app this /pair may clear its latch.
     connectionEpoch++;
-    const result = await provision(true);
+    const result = await provision(true, typeof message.code === 'string' ? message.code : null);
     if (result && result.ok) {
       void drainCommandAcks()
         .then(() => drain())

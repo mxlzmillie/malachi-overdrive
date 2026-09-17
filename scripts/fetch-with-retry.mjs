@@ -1,5 +1,14 @@
 const RETRYABLE_STATUS = new Set([406, 408, 425, 429]);
 
+function retryAfterMs(response) {
+  const raw = response.headers.get('retry-after');
+  if (!raw) return response.status === 429 ? 15_000 : 0;
+  const value = raw.trim();
+  if (/^\d+(?:\.\d+)?$/.test(value)) return Math.max(0, Number(value) * 1000);
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : response.status === 429 ? 15_000 : 0;
+}
+
 export function transientHttpStatus(status) {
   return RETRYABLE_STATUS.has(status) || status >= 500;
 }
@@ -11,8 +20,11 @@ export async function downloadWithRetry(url, options = {}) {
   const timeoutMs = options.timeoutMs ?? 180_000;
   const maxBytes = options.maxBytes ?? Number.MAX_SAFE_INTEGER;
   let lastError;
+  let serverDelay = 0;
   for (let attempt = 0; attempt < delays.length; attempt++) {
-    if (delays[attempt] > 0) await sleep(delays[attempt]);
+    const delay = Math.max(delays[attempt], serverDelay);
+    serverDelay = 0;
+    if (delay > 0) await sleep(delay);
     try {
       const response = await fetchImpl(url, {
         signal: AbortSignal.timeout(timeoutMs),
@@ -24,6 +36,7 @@ export async function downloadWithRetry(url, options = {}) {
       if (!response.ok) {
         const error = new Error(`HTTP ${response.status}`);
         if (!transientHttpStatus(response.status)) throw Object.assign(error, { retryable: false });
+        serverDelay = retryAfterMs(response);
         throw error;
       }
       if (!response.body) throw Object.assign(new Error('Response body is unavailable'), { retryable: false });

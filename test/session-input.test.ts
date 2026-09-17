@@ -13,13 +13,17 @@ import {
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import { noteChatOrigin } from '../src/main/session/recorder.js';
 import { listUsageSessions } from '../src/main/session/store.js';
+import { readInputAttachmentChunk } from '../src/main/session/input-attachments.js';
 vi.mock('../src/main/session/recorder.js', () => ({ noteChatOrigin: vi.fn(async () => undefined) }));
 
 const binding = vi.hoisted(() => ({ origin: 'desktop', conversationId: 'conversation-a', blocked: false, recorded: true, activeTurnId: null as string | null, finishEnabled: true, finishReleased: false, model: 'gpt-6-astra', leadMinutes: 5, impulseMinutes: 0, end: null as null | { kind: string; outcome: string; turnId: string; time: number } }));
+const continuation = vi.hoisted(() => ({ busy: false }));
+vi.mock('../src/main/session/continuation.js', () => ({ continuationForSession: () => continuation.busy ? { state: 'claimed' } : null }));
 vi.mock('../src/main/session/store.js', () => ({
   listUsageSessions: vi.fn(async () => []),
   conversationWasSuperseded: vi.fn(async () => false),
   readRecentEvents: vi.fn(async () => binding.end ? [binding.end] : []),
+  sessionsRoot: () => path.join(directory, 'sessions'),
   getSession: vi.fn(async (id: string) => ({ id, conversationId: id === 'session-two' ? 'conversation-b' : binding.conversationId, activeTurnId: binding.activeTurnId,
     origin: { kind: binding.origin },
     finishTurn: { turnId: binding.activeTurnId, released: binding.finishReleased },
@@ -59,6 +63,7 @@ beforeEach(async () => {
   binding.activeTurnId = null;
   binding.finishEnabled = true; binding.finishReleased = false; binding.model = 'gpt-6-astra'; binding.leadMinutes = 5; binding.impulseMinutes = 0;
   binding.end = { kind: 'turn_end', outcome: 'completed', turnId: 'previous-turn', time: 0 };
+  continuation.busy = false;
   now = 1000;
   vi.spyOn(Date, 'now').mockImplementation(() => now);
 });
@@ -70,13 +75,30 @@ afterEach(async () => {
 });
 
 describe('durable user input ownership', () => {
-  it('preserves a 64,000-character script through enqueue, restart and browser claim', async () => {
+  it('refuses a message immediately while the chat is moving and preserves idempotent existing rows', async () => {
+    const existing = input({ text: 'Already queued' });
+    await enqueueInput(existing);
+    continuation.busy = true;
+    expect(await enqueueInput(existing)).toMatchObject({ id: existing.id, state: 'queued' });
+    await expect(enqueueInput(input({ text: 'New message' }))).rejects.toThrow('Your message was not queued');
+    expect(await listInputs()).toHaveLength(1);
+    expect(await sessionInputPolicy(sessionId)).toMatchObject({ canInject: false, browserAllowed: false });
+  });
+  it('preserves a 64,000-character script and delivers its exact bytes as an owned browser attachment', async () => {
     const text = 'Cleaning site requirements.\n'.repeat(2400).slice(0, 64000).trim();
     const row = await enqueueInput(input({ sessionId: null, text }));
     resetInputForTests();
     expect((await listInputs()).find(entry => entry.id === row.id)?.text).toBe(text);
     const claimed = await claimBrowserInput(row.id, 'long-script-page', null, true);
-    expect(claimed?.text).toBe(text);
+    expect(claimed?.text).toContain('Full request');
+    expect(claimed?.attachments).toHaveLength(1);
+    const file = claimed!.attachments![0]!;
+    const chunks: Buffer[] = [];
+    for (let offset = 0; offset < file.size; offset += 512 * 1024)
+      chunks.push(Buffer.from(await readInputAttachmentChunk(file, offset), 'base64'));
+    expect(Buffer.concat(chunks).toString()).toContain(text);
+    resetInputForTests();
+    expect((await listInputs()).find(entry => entry.id === row.id)?.attachments?.[0]).toEqual(file);
     expect(await authorizeBrowserInput(row.id, 'long-script-page', null)).toBe(true);
     expect(await acknowledgeBrowserInput(row.id, 'long-script-page', binding.conversationId, 'long-script-message')).toBe(true);
     expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({ text, state: 'sent' });
@@ -973,11 +995,12 @@ it('reports oversized legacy prepared tool input as failed without blocking late
   expect(offered[0]?.text).toContain(next.text);
   expect((await listInputs())[0]).toMatchObject({ state: 'failed', error: expect.stringContaining('delivery limit') });
 });
-it('accepts a full 16k original request and a workflow within the UI 12k limit', async () => {
+it('delivers a full 16k original request and workflow as one exact browser attachment', async () => {
   const row = await enqueueInput(input({ sessionId: null, objective: '界'.repeat(16000), text: '界'.repeat(5000), stages: ['界'.repeat(6900)] }));
   const claimed = await claimBrowserInput(row.id, 'page', null, true);
-  expect(claimed?.deliveryText).toContain(row.objective);
-  expect(Buffer.byteLength(claimed!.deliveryText!)).toBeLessThan(128000);
+  expect(claimed?.deliveryText).toContain('Full request');
+  expect(claimed?.attachments).toHaveLength(1);
+  expect(Buffer.from(await readInputAttachmentChunk(claimed!.attachments![0]!, 0), 'base64').toString()).toContain(row.objective);
 });
 it('rejects an oversized restored plan before browser handout and leaves a visible failure', async () => {
   const row = await seedLegacyInput(input({ sessionId: null, text: '界'.repeat(16000), stages: Array.from({ length: 11 }, () => '界'.repeat(16000)) }));

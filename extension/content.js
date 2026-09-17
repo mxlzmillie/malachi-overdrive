@@ -6879,14 +6879,11 @@
     menuDraft = '';
     closeMenu();
     setGoalPhase('requesting');
-    // Asked again on a retryable refusal, on the same quarter-minute clock as the in-chat
-    // loop and with the same absence of an attempt limit. A goal opening is a single request
-    // holding a whole model completion, and there is no later turn for the ordinary Goal loop
-    // to try again from: a rate limit that outlives a few seconds — the usual kind — used to
-    // land the whole run on the one attempt the user made and paint "stopped" over it. The
-    // only things that end this loop are the ones that end the in-chat one: the app refusing
-    // for a settled reason, the composer no longer being this empty New Chat, or a different
-    // goal saved over this one.
+    // Asked again only after the app classifies a failure as transient. Provider enforcement
+    // such as a rate limit is deliberately non-retryable: surface that refusal and require a
+    // later user/provider state change rather than repeatedly spending requests against the
+    // same restriction. Transport/server failures can still recover here while this exact
+    // empty New Chat continues to own the goal.
     let reply = null;
     const current = () => alive && epoch === openingEpoch && composerChat().state === 'new' &&
       pendingObjective === goal && pendingObjectiveMode === (mode === 'loop' ? 'loop' : 'goal') && goalConfig?.enabled === true;
@@ -8421,11 +8418,10 @@
   /**
    * How long the loop waits before asking again about a turn whose draft failed.
    *
-   * Long enough that a provider outage costs one small request every quarter minute rather
-   * than a storm, short enough that a passing error is not felt. There is deliberately no
-   * attempt limit: the loop is finished when the model answers, and until then the only
-   * things that end it are the ones that end it anyway — Goal switched off, the user typing,
-   * a new generation, this chat left behind.
+   * Long enough that a transient transport/server outage costs one small request every quarter
+   * minute rather than a storm, short enough that a passing error is not felt. Explicit provider
+   * enforcement such as `rate_limited` is classified non-retryable app-side and never enters
+   * this loop. Other transient failures back off to the cap while the same turn stays eligible.
    */
   const GOAL_RETRY_MS = 15_000;
   const GOAL_RETRY_CAP_MS = 4 * 60_000;
@@ -10228,7 +10224,7 @@
     const rows = CLF_DOM.messages();
     const home = !CLF_DOM.conversationId() && location.pathname === '/';
     const marker = new URL(location.href).searchParams;
-    return alive && !generating && !CLF_DOM.generating() && pendingTools === 0 && !desktopInputBusy &&
+    return alive && !generating && !CLF_DOM.generating() && pendingTools === 0 && !desktopInputBusy && !goalBusy && !job?.busy &&
       !modelCatalogBusy && !pluginRefreshBusy && !desktopDecision && !commandAttempt && !commandJournalGate &&
       queue.length === 0 && !flushWork && !CLF_DOM.hasComposerAttachments() &&
       !(CLF_DOM.composer()?.textContent || '').trim() &&
@@ -10244,7 +10240,7 @@
     document.addEventListener('keydown', interrupt, true);
     const current = () => alive && !interrupted && epoch >= startEpoch && epoch <= startEpoch + (startConversation ? 1 : 0) &&
       (!CLF_DOM.conversationId() || CLF_DOM.conversationId() === startConversation) &&
-      !generating && !CLF_DOM.generating() && pendingTools === 0 &&
+      !generating && !CLF_DOM.generating() && pendingTools === 0 && !goalBusy && !job?.busy &&
       !(CLF_DOM.composer()?.textContent || '').trim() && !CLF_DOM.hasComposerAttachments();
     const failure = () => ({ ready: false, fallback: current(), preSend: true, url: location.href });
     desktopInputBusy = true;
@@ -10357,6 +10353,20 @@
       }
       if (message.type === 'clf-desktop-input') {
         void acceptDesktopInput(message).then((ok) => sendResponse({ ok })).catch(() => sendResponse({ ok: false }));
+        return true;
+      }
+      if (message.type === 'clf-confirm-input-receipt') {
+        void (async () => {
+          const conversationId = CLF_DOM.conversationId();
+          const users = CLF_DOM.messages().filter(row => row.role === 'user');
+          if (!alive || !conversationId || users.length !== 1 || !users[0].id || !users[0].node?.isConnected ||
+              typeof users[0].text !== 'string' || users[0].text.length > 240000) return { ok: false };
+          const bytes = new TextEncoder().encode(users[0].text.replace(/\s+/g, ''));
+          const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+            .map(value => value.toString(16).padStart(2, '0')).join('');
+          return alive && CLF_DOM.conversationId() === conversationId && users[0].node.isConnected
+            ? { ok: true, conversationId, messageId: users[0].id, digest } : { ok: false };
+        })().then(sendResponse).catch(() => sendResponse({ ok: false }));
         return true;
       }
       if (message.type === 'clf-recorder-ping') {

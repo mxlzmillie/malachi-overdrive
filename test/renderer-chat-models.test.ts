@@ -51,7 +51,7 @@ it('opening an empty or pending picker requests models immediately without a sep
   expect(requestChatModels).toHaveBeenCalledTimes(2);
 });
 
-it('excludes GPT-5.5 from the composer slider without excluding future observed models or settings choices', async () => {
+it('exposes every account-observed model in the composer slider', async () => {
   dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'));
   vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
   const models = [
@@ -63,10 +63,10 @@ it('excludes GPT-5.5 from the composer slider without excluding future observed 
   const { initChatModels, applyChatModels, confirmedComposerModel } = await import('../src/renderer/chat-models.js');
   initChatModels(); applyChatModels({ multiAgent: {}, goal: {} } as Config); await Promise.resolve();
   const slider = dom.window.document.querySelector<HTMLInputElement>('#composerPowerChoices input')!;
-  expect(slider.max).toBe('2');
-  expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#composerModel option')].map(option => option.value)).toEqual(['sol', 'future']);
+  expect(slider.max).toBe('5');
+  expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#composerModel option')].map(option => option.value)).toEqual(['old', 'sol', 'future']);
   expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#workerModel option')].some(option => option.value === 'old')).toBe(true);
-  slider.value = '2'; slider.dispatchEvent(new dom.window.Event('input'));
+  slider.value = '5'; slider.dispatchEvent(new dom.window.Event('input'));
   expect(confirmedComposerModel()).toEqual({ model: 'future', reasoningEffort: 'high' });
 });
 
@@ -262,6 +262,75 @@ it('uses observed account choices, preserves unverified defaults, and clears inc
   expect([...select('composerReasoning').options].map(row => row.value)).toEqual(['medium']);
 });
 
+it('keeps unavailable saved Astra visible without admitting it or replacing it with Sol', async () => {
+  dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'));
+  vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
+  let receive!: (catalog: any) => void;
+  const models = [
+    { id: '5.6', label: 'GPT-5.6 Sol', efforts: ['none', 'medium', 'high', 'xhigh'], aliases: ['gpt-5-6', 'gpt-5-6-thinking'] },
+    { id: '5.5', label: 'GPT-5.5', efforts: ['none', 'medium', 'high', 'xhigh'], aliases: ['gpt-5-5-instant', 'gpt-5-5-thinking'] }
+  ];
+  const availableAstra = { id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] };
+  Object.assign(dom.window, { api: {
+    getChatModels: async () => ({ ok: true, data: { state: 'ready', requestedAt: 1, observedAt: 2, models: [...models, availableAstra] } }),
+    onChatModelsChanged: (listener: typeof receive) => { receive = listener; }
+  } });
+  const { initChatModels, applyChatModels, confirmedComposerModel, ensureComposerModel } = await import('../src/renderer/chat-models.js');
+  initChatModels();
+  applyChatModels({ multiAgent: { defaultModel: '6', defaultReasoning: 'pro' }, goal: { helperModel: 'gpt-6-pro', helperReasoning: 'pro' } } as Config);
+  await Promise.resolve();
+  expect(confirmedComposerModel()).toEqual({ model: '6', reasoningEffort: 'pro' });
+  receive({ state: 'ready', requestedAt: 3, observedAt: 4, models });
+  const select = (id: string) => dom.window.document.getElementById(id) as HTMLSelectElement;
+  for (const id of ['composerModel', 'workerModel', 'helperModel']) {
+    expect(select(id).value).toBe('6');
+    expect(select(id).selectedOptions[0]!.disabled).toBe(true);
+    expect(select(id).selectedOptions[0]!.text).toBe('GPT-6 Astra · Unavailable in ChatGPT');
+  }
+  expect(select('composerReasoning').value).toBe('pro');
+  expect(confirmedComposerModel()).toBeNull();
+  expect(await ensureComposerModel()).toBeNull();
+  const status = dom.window.document.getElementById('composerModelStatus')!;
+  expect(status.hidden).toBe(false);
+  expect(status.textContent).toContain('GPT-6 Astra · Pro is unavailable in the current ChatGPT model list');
+  expect(status.textContent).toContain('Choose an available model or reload models');
+  expect(dom.window.document.getElementById('chatModelStatus')!.textContent).toContain('Saved choices unavailable');
+  // A refreshed account catalog may restore the same saved selection; no substitute is sent.
+  receive({ state: 'ready', requestedAt: 5, observedAt: 6, models: [...models, availableAstra] });
+  expect(confirmedComposerModel()).toEqual({ model: '6', reasoningEffort: 'pro' });
+  expect(select('composerModel').selectedOptions[0]!.disabled).toBe(false);
+  expect(status.hidden).toBe(true);
+  // When it is unavailable, explicitly choosing an observed alternative still works.
+  receive({ state: 'ready', requestedAt: 7, observedAt: 8, models });
+  select('composerModel').value = '5.6'; select('composerModel').dispatchEvent(new dom.window.Event('change'));
+  expect(confirmedComposerModel()).toEqual({ model: '5.6', reasoningEffort: 'high' });
+  expect(status.hidden).toBe(true);
+});
+
+it('does not manufacture Astra from Sol-only discovery or admit a stale injected Astra choice', async () => {
+  dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'));
+  vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
+  const models = [{ id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high'] }];
+  Object.assign(dom.window, { api: { getChatModels: async () => ({ ok: true, data: { state: 'ready', requestedAt: 1, observedAt: 2, models } }) } });
+  const { initChatModels, applyChatModels, confirmedComposerModel, ensureComposerModel } = await import('../src/renderer/chat-models.js');
+  initChatModels();
+  applyChatModels({ multiAgent: { defaultModel: 'gpt-6-pro', defaultReasoning: 'pro' }, goal: { helperModel: '6', helperReasoning: 'pro' } } as Config);
+  await Promise.resolve();
+  const select = (id: string) => dom.window.document.getElementById(id) as HTMLSelectElement;
+  expect([...select('composerModel').options].map(option => option.value)).toEqual(['5.6']);
+  expect(select('workerModel').value).toBe('gpt-6-pro');
+  expect(select('workerModel').selectedOptions[0]!.disabled).toBe(true);
+  expect(select('helperModel').value).toBe('6');
+  expect(select('helperModel').selectedOptions[0]!.disabled).toBe(true);
+  expect(dom.window.document.getElementById('chatModelStatus')!.textContent).toContain('GPT-6 Astra · Pro');
+  for (const [id, value] of [['composerModel', 'gpt-6-pro'], ['composerReasoning', 'pro']]) {
+    const option = dom.window.document.createElement('option'); option.value = value!;
+    select(id!).append(option); select(id!).value = value!;
+  }
+  expect(confirmedComposerModel()).toBeNull();
+  expect(await ensureComposerModel()).toBeNull();
+});
+
 it('offers only observed models, prefers supported GPT-6 High, and replaces a removed account selection', async () => {
   dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'));
   vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
@@ -328,7 +397,7 @@ it('defaults a new chat to account-observed GPT-6 Pro even when Sol is the first
   expect((dom.window.document.getElementById('composerModel') as HTMLSelectElement).selectedOptions[0]!.text).toBe('GPT-6 Astra');
 });
 
-it('keeps observed composer choices in provider order except the user-excluded GPT-5.5 section', async () => {
+it('keeps every observed composer model in provider order while preserving supported effort order', async () => {
   dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'));
   vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
   const models = [
@@ -341,14 +410,18 @@ it('keeps observed composer choices in provider order except the user-excluded G
   initChatModels(); applyChatModels({ multiAgent: {}, goal: {} } as Config); await Promise.resolve();
   const doc = dom.window.document;
   const slider = doc.querySelector<HTMLInputElement>('#composerPowerChoices input')!;
-  expect(slider.max).toBe('3');
-  expect(doc.querySelectorAll('.power-dot')).toHaveLength(4);
+  expect(slider.max).toBe('6');
+  expect(doc.querySelectorAll('.power-dot')).toHaveLength(7);
   const header = doc.querySelector('.power-header')!;
   expect(header.querySelector('.power-icon') === null).toBe(true);
   expect(header.querySelector('#composerPowerTitle')).not.toBeNull();
   expect(header.querySelector('#composerPowerModel')).not.toBeNull();
   expect(header.querySelector('#refreshComposerModels')).not.toBeNull();
-  const expected = [['astra', 'high'], ['sol', 'low'], ['sol', 'medium'], ['sol', 'high']];
+  const expected = [
+    ['astra', 'high'],
+    ['old', 'low'], ['old', 'high'], ['old', 'pro'],
+    ['sol', 'low'], ['sol', 'medium'], ['sol', 'high']
+  ];
   for (const [index, [model, reasoningEffort]] of expected.entries()) {
     slider.value = String(index); slider.dispatchEvent(new dom.window.Event('input'));
     expect(confirmedComposerModel()).toEqual({ model, reasoningEffort });
@@ -408,14 +481,15 @@ it('paints catalog pushes immediately and refuses late startup reads without ref
   expect(getChatModels).toHaveBeenCalledTimes(1);
 });
 it('maps saved execution slugs to the observed family while preserving Pro reasoning', async () => {
-  dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'));
+  dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'), { url: 'https://malachi-overdrive.local/' });
   vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
   Object.assign(dom.window, { api: { getChatModels: async () => ({ ok: true, data: { state: 'ready', requestedAt: 1, observedAt: 2,
     models: [{ id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high', 'pro'], aliases: ['gpt-5-6-thinking', 'gpt-5-6-pro'] }] } }) } });
   const { initChatModels, applyChatModels } = await import('../src/renderer/chat-models.js');
   initChatModels(); applyChatModels({ multiAgent: { defaultModel: 'gpt-5-6-pro', defaultReasoning: 'pro' }, goal: {} } as Config); await Promise.resolve();
   const model = dom.window.document.getElementById('workerModel') as HTMLSelectElement;
-  expect(model.value).toBe('5.6'); expect(model.options).toHaveLength(1);
+  expect(model.value).toBe('5.6');
+  expect([...model.options].map(option => option.value)).toEqual(['5.6']);
   expect((dom.window.document.getElementById('workerReasoning') as HTMLSelectElement).value).toBe('pro');
 });
 it.each(['5.6', 'gpt-5.6-sol', 'GPT-5.6 Sol', 'gpt-5-6-thinking'])('keeps saved Sol High selected across reordered catalogs: %s', async saved => {

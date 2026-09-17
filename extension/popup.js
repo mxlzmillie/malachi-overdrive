@@ -227,6 +227,7 @@ function paintHeader(status) {
   $('retryBtn').hidden = ready || incompatible;
   $('retryBtn').textContent = off ? 'Connect' : 'Try again';
   $('unpairBtn').hidden = !paired || incompatible;
+  $('pairing').hidden = ready || incompatible;
   return ready;
 }
 
@@ -239,6 +240,8 @@ function paintAlert(status, info) {
     ? `App v${status.appVersion || '?'} (protocol ${status.appProtocol ?? '?'}); companion v${status.extensionVersion || '?'} (protocol ${status.extensionProtocol ?? '?'}). Open your browser's Extensions page, enable Developer mode, then Update / Reload this companion. If the mismatch remains, use Open extension folder in MALACHI OVERDRIVE and load that folder. Reload ChatGPT tabs when their active work is finished.`
     : pairError && pairError.message
       ? pairError.message
+      : pairError && pairError.error === 'pairing_code_required'
+        ? 'Enter the current pairing code from MALACHI OVERDRIVE → Setup → Browser.'
       : pairError && pairError.error === 'secure_storage_unavailable'
         ? 'Secure credential storage is unavailable. Open MALACHI OVERDRIVE for setup instructions.'
     : error && Date.now() - error.at < 10 * 60 * 1000
@@ -403,8 +406,16 @@ $('reloadBtn').addEventListener('click', () => {
 });
 
 $('retryBtn').addEventListener('click', async () => {
+  const code = $('pairingCode').value.trim();
+  if (!/^[a-fA-F0-9]{6}-?[a-fA-F0-9]{6}$/.test(code)) {
+    $('alert').textContent = 'Enter the 12-character pairing code shown in MALACHI OVERDRIVE → Setup → Browser.';
+    $('alert').hidden = false;
+    $('pairingCode').focus();
+    return;
+  }
   $('retryBtn').disabled = true;
-  await chrome.runtime.sendMessage({ type: 'pair' });
+  await chrome.runtime.sendMessage({ type: 'pair', code });
+  $('pairingCode').value = '';
   $('retryBtn').disabled = false;
   await refresh();
 });

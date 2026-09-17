@@ -89,6 +89,8 @@ import { conversationAttachment, readOverflowText } from '../session/store.js';
 import type { StoredText, ToolOutcome } from '../../shared/session.js';
 
 export interface ToolContext {
+  /** Re-read live permissions for an app-owned preview after the tool call has ended. */
+  liveContext?: () => ToolContext;
   exposedFinishTool?: boolean;
   roots: Root[];
   /** Capabilities currently allowed by the live settings. */

@@ -82,6 +82,11 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+.pairing { display: block; margin: 12px 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.pairing[hidden] { display: none; }
+.pairing input { display: block; width: 100%; margin-top: 6px; padding: 9px 11px; border: 1px solid var(--hollow); border-radius: 8px; background: var(--card); color: var(--text); font: 600 14px var(--mono); letter-spacing: .04em; }
+.pairing button { margin-top: 8px; padding: 8px 13px; border: 1px solid var(--hollow); border-radius: 8px; background: var(--card); color: var(--text); cursor: pointer; }
+
 /*
  * A plain grey bar. The stock Windows scrollbar is a wide light-grey trough with arrow
  * buttons, drawn from the OS theme rather than this palette, and in a 340px dark panel it

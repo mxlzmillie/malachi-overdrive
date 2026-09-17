@@ -31,8 +31,24 @@ it('fails permanent HTTP and reviewed-size violations without retrying', async (
 
 it('bounds retries and classifies only temporary response statuses', async () => {
   const failing = vi.fn().mockResolvedValue(reply(429));
-  await expect(downloadWithRetry('https://example.test/source', { fetchImpl: failing, sleep: noSleep, delays: [0, 0, 0, 0] })).rejects.toThrow('HTTP 429');
+  const sleeps: number[] = [];
+  await expect(downloadWithRetry('https://example.test/source', { fetchImpl: failing, sleep: async ms => { sleeps.push(ms); }, delays: [0, 0, 0, 0] })).rejects.toThrow('HTTP 429');
   expect(failing).toHaveBeenCalledTimes(4);
+  expect(sleeps).toEqual([15_000, 15_000, 15_000]);
   expect([406, 408, 425, 429, 500, 503].every(transientHttpStatus)).toBe(true);
   expect([400, 401, 403, 404].some(transientHttpStatus)).toBe(false);
+});
+
+it('honors a provider Retry-After before another bounded download attempt', async () => {
+  const fetchImpl = vi.fn()
+    .mockResolvedValueOnce(new Response('busy', { status: 429, headers: { 'Retry-After': '37' } }))
+    .mockResolvedValueOnce(reply(200, 'complete'));
+  const sleeps: number[] = [];
+  await expect(downloadWithRetry('https://example.test/source', {
+    fetchImpl,
+    sleep: async ms => { sleeps.push(ms); },
+    delays: [0, 750],
+    maxBytes: 32,
+  })).resolves.toEqual(Buffer.from('complete'));
+  expect(sleeps).toEqual([37_000]);
 });

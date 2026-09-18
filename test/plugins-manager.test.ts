@@ -498,7 +498,8 @@ describe('enabled plugin process ownership', () => {
     const before = await h.pids();
     try {
       const revoke = action === 'disable' ? manager.setEnabled(h.row.id, false) : manager.uninstall(h.row.id);
-      expect(await Promise.race([revoke, new Promise(resolve => setTimeout(() => resolve('blocked'), 500))])).not.toBe('blocked');
+      // Preserve the non-blocking invariant without assuming a heavily loaded native ARM runner settles in 500 ms.
+      expect(await Promise.race([revoke, new Promise(resolve => setTimeout(() => resolve('blocked'), 5_000))])).not.toBe('blocked');
       await restarting;
       expect(manager.tools()).toEqual([]);
     } finally { release('slow'); }

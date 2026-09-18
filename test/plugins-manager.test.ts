@@ -664,7 +664,8 @@ describe('enabled plugin process ownership', () => {
     await fs.writeFile(file, JSON.stringify(stored));
     manager = new PluginManager(); await manager.initialize(dir);
     expect(manager.tools()).toEqual([]);
-    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'));
+    // Background rediscovery may need a few seconds to spawn on loaded native Windows runners.
+    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'), { timeout: 10_000 });
     expect(manager.tools().map(tool => tool.name)).toEqual(['Echo.Mixed']);
     expect(await h.pids()).toHaveLength(2);
     expect(alive((await h.pids())[1]!.pid)).toBe(true);

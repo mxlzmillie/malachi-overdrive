@@ -552,7 +552,8 @@ describe('enabled plugin process ownership', () => {
     expect(manager.tools().map(tool => tool.name)).toEqual(['Echo.Mixed']);
     await vi.waitFor(() => expect(releaseSecret).toBeTypeOf('function'));
     releaseSecret('fixture-value');
-    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'));
+    // Native Windows ARM runners can take longer than Vitest's default wait to spawn.
+    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'), { timeout: 10_000 });
     await manager.setEnabled(h.row.id, false);
     const before = await h.pids();
     await manager.close(); manager = new PluginManager(); await manager.initialize(dir);
@@ -565,7 +566,7 @@ describe('enabled plugin process ownership', () => {
     expect(alive((await h.pids())[0]!.pid)).toBe(true);
     await manager.close(); manager = new PluginManager(); await manager.initialize(dir);
     expect(manager.tools().map(tool => tool.name)).toEqual(['Echo.Mixed']);
-    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'));
+    await vi.waitFor(() => expect(manager.snapshot().plugins[0]!.status).toBe('ready'), { timeout: 10_000 });
     const active = (await h.pids())[1]!;
     vi.useFakeTimers();
     expect((await manager.call('Echo.Mixed', { value: 'first' })).isError).not.toBe(true);

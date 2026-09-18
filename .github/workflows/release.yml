@@ -113,6 +113,8 @@ jobs:
       MACOS_APPLE_API_KEY_CONTENT: ${{ secrets.MACOS_APPLE_API_KEY }}
       APPLE_API_KEY_ID: ${{ secrets.MACOS_APPLE_API_KEY_ID }}
       APPLE_API_ISSUER: ${{ secrets.MACOS_APPLE_API_ISSUER }}
+      # Public identifier pinned by the bundle audit so a different Developer ID cannot pass.
+      APPLE_TEAM_ID: K5Q2CQN9PQ
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

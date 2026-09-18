@@ -52,3 +52,18 @@ it('honors a provider Retry-After before another bounded download attempt', asyn
   })).resolves.toEqual(Buffer.from('complete'));
   expect(sleeps).toEqual([37_000]);
 });
+
+it('gives a transient archive-provider 406 a cooldown before retrying', async () => {
+  const fetchImpl = vi.fn()
+    .mockResolvedValueOnce(reply(406, 'temporarily rejected'))
+    .mockResolvedValueOnce(reply(200, 'complete'));
+  const sleeps: number[] = [];
+  await expect(downloadWithRetry('https://example.test/archive.tar.gz', {
+    fetchImpl,
+    sleep: async ms => { sleeps.push(ms); },
+    delays: [0, 0],
+    maxBytes: 32,
+  })).resolves.toEqual(Buffer.from('complete'));
+  expect(sleeps).toEqual([15_000]);
+  expect(fetchImpl).toHaveBeenCalledTimes(2);
+});

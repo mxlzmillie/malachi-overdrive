@@ -382,6 +382,7 @@ describe('cross-platform packaging targets', () => {
     expect(packageScript).toContain('COS_PACKAGE_ARCH: arch');
     const releaseWorkflow = readFileSync(path.join(root, '.github', 'workflows', 'release.yml'), 'utf8');
     expect(releaseWorkflow).toContain('MALACHI_OVERDRIVE_RELEASE_REPOSITORY: ${{ github.repository }}');
+    expect(releaseWorkflow).toContain('APPLE_TEAM_ID: K5Q2CQN9PQ');
     const viteConfig = readFileSync(path.join(root, 'electron.vite.config.ts'), 'utf8');
     expect(viteConfig).toContain('__MALACHI_OVERDRIVE_RELEASE_REPOSITORY__');
     expect(viteConfig).toContain('MALACHI_OVERDRIVE_RELEASE_REPOSITORY');

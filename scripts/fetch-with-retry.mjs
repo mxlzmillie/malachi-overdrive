@@ -1,12 +1,13 @@
 const RETRYABLE_STATUS = new Set([406, 408, 425, 429]);
+const DEFAULT_DELAYS = [0, 5_000, 20_000, 60_000, 120_000];
 
 function retryAfterMs(response) {
   const raw = response.headers.get('retry-after');
-  if (!raw) return response.status === 429 ? 15_000 : 0;
+  if (!raw) return response.status === 406 || response.status === 429 ? 15_000 : 0;
   const value = raw.trim();
   if (/^\d+(?:\.\d+)?$/.test(value)) return Math.max(0, Number(value) * 1000);
   const at = Date.parse(value);
-  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : response.status === 429 ? 15_000 : 0;
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : response.status === 406 || response.status === 429 ? 15_000 : 0;
 }
 
 export function transientHttpStatus(status) {
@@ -16,7 +17,10 @@ export function transientHttpStatus(status) {
 export async function downloadWithRetry(url, options = {}) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const delays = options.delays ?? [0, 750, 2_000, 5_000];
+  // Some immutable archive providers transiently return 406 while applying anonymous
+  // anti-abuse limits. Keep retries bounded, but give that provider-side window time to
+  // clear instead of repeating the same request four times in under eight seconds.
+  const delays = options.delays ?? DEFAULT_DELAYS;
   const timeoutMs = options.timeoutMs ?? 180_000;
   const maxBytes = options.maxBytes ?? Number.MAX_SAFE_INTEGER;
   let lastError;

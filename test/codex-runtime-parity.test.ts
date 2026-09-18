@@ -325,7 +325,7 @@ describe('Codex unified exec runtime parity', () => {
     managers.push(instance);
     const processId = instance.allocateProcessId();
     const marker = 'héllo 中文 😀';
-    const output = await instance.execCommand({
+    let output = await instance.execCommand({
       command: deriveExecArgs(shell!, `Write-Output '${marker}'`, false),
       shellType: 'powershell',
       hookCommand: `Write-Output '${marker}'`,
@@ -343,9 +343,20 @@ describe('Codex unified exec runtime parity', () => {
       env: applyUnifiedExecEnv(process.env),
       tty: false
     });
+    const chunks = [output.rawOutput];
+    if (output.exitCode === null) {
+      output = await instance.writeStdin({
+        processId,
+        input: '',
+        yieldTimeMs: 10_000,
+        maxOutputTokens: undefined,
+        truncationPolicy
+      });
+      chunks.push(output.rawOutput);
+    }
 
     expect(output.exitCode).toBe(0);
-    expect(output.rawOutput.toString('utf8')).toContain(marker);
+    expect(Buffer.concat(chunks).toString('utf8')).toContain(marker);
   });
 
   it('lets the initial exec response observe concurrent termination, matching Codex', async () => {

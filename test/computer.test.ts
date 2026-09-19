@@ -113,11 +113,25 @@ public sealed class AmbientUiaFixture : System.Windows.Forms.Form {
 $form = New-Object AmbientUiaFixture
 $form.Text = 'MALACHI UIA test fixture'
 $form.ShowInTaskbar = $false
+$form.ClientSize = New-Object System.Drawing.Size(320,180)
 $button = New-Object System.Windows.Forms.Button
 $button.Text = 'Owned UIA button'
 $button.AccessibleName = 'Owned UIA button'
+$button.Location = New-Object System.Drawing.Point(24,24)
+$button.Size = New-Object System.Drawing.Size(160,32)
 $form.Controls.Add($button)
-$form.Add_Shown({ [Console]::WriteLine('READY:' + $form.Handle.ToInt64()); [Console]::Out.Flush() })
+$form.Add_Shown({
+  # Shown fires before some WinForms accessibility providers have published their child tree.
+  # Let one real message-loop interval elapse before the Node side starts querying UIA.
+  $script:readyTimer = New-Object System.Windows.Forms.Timer
+  $script:readyTimer.Interval = 250
+  $script:readyTimer.Add_Tick({
+    $script:readyTimer.Stop()
+    [Console]::WriteLine('READY:' + $form.Handle.ToInt64())
+    [Console]::Out.Flush()
+  })
+  $script:readyTimer.Start()
+})
 [System.Windows.Forms.Application]::Run($form)
 `;
     const fixture = spawn(findWindowsPowerShell() ?? 'powershell.exe', [
@@ -142,7 +156,12 @@ $form.Add_Shown({ [Console]::WriteLine('READY:' + $form.Handle.ToInt64()); [Cons
           reject(new Error(`UIA fixture exited (${code}): ${stderr}`));
         });
       });
-      const result = await findUi({ window, role: 'Button', maxResults: 5 });
+      const deadline = Date.now() + 5_000;
+      let result = await findUi({ window, query: 'Owned UIA button', role: 'Button', maxResults: 5 });
+      while (!result.elements.some((element) => element.name === 'Owned UIA button') && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        result = await findUi({ window, query: 'Owned UIA button', role: 'Button', maxResults: 5 });
+      }
       expect(result.window).toBe(window);
       expect(result.elements.some((element) => element.name === 'Owned UIA button')).toBe(true);
       expect(result.elements.length).toBeLessThanOrEqual(5);

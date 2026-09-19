@@ -225,6 +225,10 @@ describe('cross-platform packaging targets', () => {
     expect(parsed.jobs.package['runs-on']).toBe('${{ matrix.runner }}');
     expect(parsed.jobs.assemble.needs).toEqual(['package', 'sources']);
     expect(workflow).toContain('name: chat-on-steroids-candidate-${{ github.run_id }}');
+    expect(workflow).toContain('Install generated Windows NSIS package');
+    expect(workflow).toContain("Start-Process -FilePath $installer -ArgumentList @('/S', \"/D=$installDir\") -PassThru -Wait");
+    expect(workflow).toContain("node scripts/smoke-packaged-runtime.mjs --platform win32 --arch '${{ matrix.arch }}' --root \"$installDir\"");
+    expect(workflow).toContain('Launch installed Windows app normally');
     expect(workflow).toContain('Install generated DEB on target distro');
     expect(workflow).toContain('Launch installed DEB normally under Xvfb');
     expect(workflow).toContain('CLF_DEBUG=1 timeout --signal=TERM --kill-after=5s 12s xvfb-run -a /usr/bin/chat-on-steroids');
@@ -270,6 +274,19 @@ describe('cross-platform packaging targets', () => {
     expect(macGuiScript).toContain("child.kill('SIGTERM')");
     expect(macGuiScript).toContain("child.kill('SIGKILL')");
     expect(macGuiScript).not.toContain('ELECTRON_RUN_AS_NODE');
+
+    const windowsGui = workflow.slice(
+      workflow.indexOf('      - name: Launch installed Windows app normally'),
+      workflow.indexOf('      - name: Audit packaged macOS bundle metadata and Mach-O payloads')
+    );
+    expect(windowsGui).toContain('-ArgumentList "--user-data-dir=$profile"');
+    expect(windowsGui).toContain('Start-Sleep -Seconds 12');
+    expect(windowsGui).toContain("'[info] app started'");
+    expect(windowsGui).toContain("'[info] window loaded'");
+    expect(windowsGui).toContain("'[info] renderer state ready'");
+    expect(windowsGui).toContain("'[error] window failed to load'");
+    expect(windowsGui).toContain("'[error] renderer:'");
+    expect(windowsGui).not.toContain('ELECTRON_RUN_AS_NODE');
 
     const debGui = workflow.slice(
       workflow.indexOf('      - name: Launch installed DEB normally under Xvfb'),
@@ -731,6 +748,11 @@ Load command 11
     expect(workflow.slice(publish)).toContain('node scripts/check-release-absent.mjs');
     expect(workflow.slice(publish).match(/npm run verify:tunnel-current/g)).toHaveLength(1);
     expect(workflow).toContain('name: chat-on-steroids-candidate-${{ github.run_id }}');
+    const publishedVerification = workflow.slice(workflow.indexOf('      - name: Verify the published release'));
+    expect(publishedVerification).toContain("gh release view \"$TAG\" --json assets --jq '.assets[].name'");
+    expect(publishedVerification).toContain('gh release download "$TAG" --dir "$published_dir"');
+    expect(publishedVerification).toContain('cmp publish/SHA256SUMS.txt "$published_dir/SHA256SUMS.txt"');
+    expect(publishedVerification).toContain('sha256sum -c SHA256SUMS.txt');
   });
 
   it('keeps the current changelog and reviewed release notes aligned with every published artifact', () => {
@@ -774,10 +796,12 @@ Load command 11
     );
     const candidateUpload = release.slice(release.indexOf('      - name: Upload release candidate'));
     const publishStep = publish.slice(publish.indexOf('      - name: Publish the release'));
+    const publishedVerification = publish.slice(publish.indexOf('      - name: Verify the published release'));
     for (const artifact of artifacts) {
       expect(notes).toContain(`\`${artifact}\``);
       expect(candidateUpload).toContain(artifact);
       expect(publishStep).toContain(artifact);
+      expect(publishedVerification).toContain(artifact);
     }
     for (const artifact of artifacts.filter((artifact) => artifact !== 'SHA256SUMS.txt')) {
       expect(checksumStep).toContain(artifact);

@@ -11,16 +11,21 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
-## [2.0.21] — 2026-09-19
+## [2.0.22] — 2026-09-19
 
 - Hardened Ambient Work Mode around exact task ownership, truthful activity and explicit recovery.
 - Kept background worker isolation independent of ordinary chat-opening preferences and preserved
   explicit model and reasoning requirements.
 - Expanded the compact activity preview and retained the full Control Rail as an explicit action.
-- Replaced the Windows UI Automation smoke test's uncontrolled foreground target with an owned
-  window and known control; production helper timeouts remain unchanged.
+- Made the owned Windows UI Automation release fixture wait for its accessibility tree before
+  asserting the exact known control; production helper timeouts and behavior remain unchanged.
 
-See [the full release notes](docs/release-notes/v2.0.21.md).
+See [the full release notes](docs/release-notes/v2.0.22.md).
+
+## [2.0.21] — 2026-09-19 (unpublished candidate)
+
+- Release publication was blocked by the Windows UI Automation fixture readiness gate; no 2.0.21
+  GitHub release was created. Its product changes are carried forward into 2.0.22.
 
 ## [2.0.20] — 2026-09-19
 

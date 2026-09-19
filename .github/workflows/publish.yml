@@ -197,4 +197,42 @@ jobs:
             publish/SHA256SUMS.txt \
             --title "$(sed -n 's/^## //p' "docs/release-notes/$TAG.md" | head -n 1)" \
             --notes-file "docs/release-notes/$TAG.md"
+
+      # GitHub is the final distribution boundary. Re-download the public assets into a fresh
+      # directory and prove both the exact asset set and every payload digest still match the
+      # candidate that passed the native packaging matrix.
+      - name: Verify the published release
+        run: |
+          set -euo pipefail
+          expected_assets="$(cat <<'EOF'
+          MALACHI-OVERDRIVE-Extension.zip
+          MALACHI-OVERDRIVE-Linux-arm64.AppImage
+          MALACHI-OVERDRIVE-Linux-arm64.deb
+          MALACHI-OVERDRIVE-Linux-x64.AppImage
+          MALACHI-OVERDRIVE-Linux-x64.deb
+          MALACHI-OVERDRIVE-Native-Sources.tar.gz
+          MALACHI-OVERDRIVE-Setup-arm64.exe
+          MALACHI-OVERDRIVE-Setup-x64.exe
+          MALACHI-OVERDRIVE-macOS-arm64.dmg
+          MALACHI-OVERDRIVE-macOS-arm64.zip
+          MALACHI-OVERDRIVE-macOS-x64.dmg
+          MALACHI-OVERDRIVE-macOS-x64.zip
+          SHA256SUMS.txt
+          EOF
+          )"
+          published_assets="$(gh release view "$TAG" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
+          if [ "$published_assets" != "$expected_assets" ]; then
+            echo "Published asset set does not match the reviewed release contract." >&2
+            diff -u <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$published_assets") || true
+            exit 1
+          fi
+
+          published_dir="$(mktemp -d)"
+          trap 'rm -rf "$published_dir"' EXIT
+          gh release download "$TAG" --dir "$published_dir"
+          cmp publish/SHA256SUMS.txt "$published_dir/SHA256SUMS.txt"
+          (
+            cd "$published_dir"
+            sha256sum -c SHA256SUMS.txt
+          )
           gh release view "$TAG" --json url --jq .url

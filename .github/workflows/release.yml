@@ -157,6 +157,66 @@ jobs:
       - name: Smoke packaged runtime natively
         run: node scripts/smoke-packaged-runtime.mjs --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
 
+      - name: Install generated Windows NSIS package
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $PWD 'release/MALACHI-OVERDRIVE-Setup-${{ matrix.arch }}.exe'
+          if (-not (Test-Path -LiteralPath $installer)) {
+            throw "Missing Windows installer: $installer"
+          }
+          $installDir = Join-Path $env:RUNNER_TEMP 'malachi-overdrive-installed-${{ matrix.arch }}'
+          if (Test-Path -LiteralPath $installDir) {
+            Remove-Item -LiteralPath $installDir -Recurse -Force
+          }
+          $install = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installDir") -PassThru -Wait
+          if ($install.ExitCode -ne 0) {
+            throw "Windows installer exited with status $($install.ExitCode)"
+          }
+          $installedExe = Join-Path $installDir 'MALACHI OVERDRIVE.exe'
+          if (-not (Test-Path -LiteralPath $installedExe)) {
+            throw "Windows installer did not create $installedExe"
+          }
+          node scripts/smoke-packaged-runtime.mjs --platform win32 --arch '${{ matrix.arch }}' --root "$installDir"
+          "COS_WINDOWS_INSTALL_DIR=$installDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Launch installed Windows app normally
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installedExe = Join-Path $env:COS_WINDOWS_INSTALL_DIR 'MALACHI OVERDRIVE.exe'
+          if (-not (Test-Path -LiteralPath $installedExe)) {
+            throw "Installed Windows executable is missing: $installedExe"
+          }
+          $profile = Join-Path $env:RUNNER_TEMP 'malachi-overdrive-gui-${{ matrix.arch }}'
+          New-Item -ItemType Directory -Path $profile -Force | Out-Null
+          $stdout = Join-Path $profile 'stdout.log'
+          $stderr = Join-Path $profile 'stderr.log'
+          $env:CLF_DEBUG = '1'
+          $process = Start-Process -FilePath $installedExe -ArgumentList "--user-data-dir=$profile" -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          Start-Sleep -Seconds 12
+          $process.Refresh()
+          $exitedEarly = $process.HasExited
+          if (-not $exitedEarly) {
+            & taskkill.exe /PID $process.Id /T /F | Out-Null
+            Start-Sleep -Milliseconds 500
+          }
+          $output = ''
+          if (Test-Path -LiteralPath $stdout) { $output += Get-Content -LiteralPath $stdout -Raw }
+          if (Test-Path -LiteralPath $stderr) { $output += Get-Content -LiteralPath $stderr -Raw }
+          Write-Host $output
+          if ($exitedEarly) {
+            throw "Installed Windows GUI exited before the intentional 12-second smoke window"
+          }
+          foreach ($marker in @('[info] app started', '[info] window loaded', '[info] renderer state ready')) {
+            if (-not $output.Contains($marker)) { throw "Installed Windows GUI did not report $marker" }
+          }
+          foreach ($failure in @('[error] window failed to load', '[error] renderer:')) {
+            if ($output.Contains($failure)) { throw "Installed Windows GUI reported $failure" }
+          }
+
       - name: Audit packaged macOS bundle metadata and Mach-O payloads
         if: matrix.platform == 'darwin'
         run: node scripts/smoke-macos-bundle.mjs ${{ matrix.arch }}

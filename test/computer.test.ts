@@ -104,62 +104,156 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     // neither the runner's foreground nor an empty result is evidence that UIA works.
     const script = `
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing,System -TypeDefinition @'
+Add-Type -ReferencedAssemblies System -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class AmbientFixtureNative {
-  [DllImport("user32.dll")]
-  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-  [DllImport("user32.dll")]
-  public static extern bool IsWindowVisible(IntPtr hWnd);
-}
+public static class AmbientUiaFixture {
+  private const uint WS_OVERLAPPEDWINDOW = 0x00CF0000;
+  private const uint WS_CHILD = 0x40000000;
+  private const uint WS_VISIBLE = 0x10000000;
+  private const uint WS_EX_TOOLWINDOW = 0x00000080;
+  private const uint WS_EX_NOACTIVATE = 0x08000000;
+  private const int SW_SHOWNOACTIVATE = 4;
+  private const uint WM_DESTROY = 0x0002;
 
-public sealed class AmbientUiaFixture : System.Windows.Forms.Form {
-  protected override bool ShowWithoutActivation { get { return true; } }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct WNDCLASSEX {
+    public uint cbSize;
+    public uint style;
+    public IntPtr lpfnWndProc;
+    public int cbClsExtra;
+    public int cbWndExtra;
+    public IntPtr hInstance;
+    public IntPtr hIcon;
+    public IntPtr hCursor;
+    public IntPtr hbrBackground;
+    [MarshalAs(UnmanagedType.LPWStr)] public string lpszMenuName;
+    [MarshalAs(UnmanagedType.LPWStr)] public string lpszClassName;
+    public IntPtr hIconSm;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct POINT { public int x; public int y; }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct RECT { public int left; public int top; public int right; public int bottom; }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct MSG {
+    public IntPtr hwnd;
+    public uint message;
+    public UIntPtr wParam;
+    public IntPtr lParam;
+    public uint time;
+    public POINT pt;
+    public uint lPrivate;
+  }
+
+  [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+  private delegate IntPtr WndProc(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
+
+  private static readonly WndProc WindowProc = WindowProcedure;
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+  private static extern IntPtr GetModuleHandle(string name);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern ushort RegisterClassExW(ref WNDCLASSEX windowClass);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern IntPtr CreateWindowExW(uint exStyle, string className, string windowName,
+    uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu,
+    IntPtr instance, IntPtr parameter);
+  [DllImport("user32.dll")]
+  private static extern bool ShowWindow(IntPtr hwnd, int command);
+  [DllImport("user32.dll")]
+  private static extern bool UpdateWindow(IntPtr hwnd);
+  [DllImport("user32.dll")]
+  private static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")]
+  private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")]
+  private static extern int GetMessageW(out MSG message, IntPtr hwnd, uint min, uint max);
+  [DllImport("user32.dll")]
+  private static extern bool TranslateMessage(ref MSG message);
+  [DllImport("user32.dll")]
+  private static extern IntPtr DispatchMessageW(ref MSG message);
+  [DllImport("user32.dll")]
+  private static extern IntPtr DefWindowProcW(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")]
+  private static extern void PostQuitMessage(int exitCode);
+
+  private static IntPtr WindowProcedure(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam) {
+    if (message == WM_DESTROY) {
+      PostQuitMessage(0);
+      return IntPtr.Zero;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+  }
+
+  public static void Run() {
+    IntPtr instance = GetModuleHandle(null);
+    string className = "MalachiAmbientUiaFixture_" + System.Diagnostics.Process.GetCurrentProcess().Id;
+    var windowClass = new WNDCLASSEX {
+      cbSize = (uint)Marshal.SizeOf(typeof(WNDCLASSEX)),
+      lpfnWndProc = Marshal.GetFunctionPointerForDelegate(WindowProc),
+      hInstance = instance,
+      hbrBackground = new IntPtr(6),
+      lpszClassName = className
+    };
+    if (RegisterClassExW(ref windowClass) == 0) {
+      throw new InvalidOperationException("RegisterClassExW failed: " + Marshal.GetLastWin32Error());
+    }
+
+    IntPtr parent = CreateWindowExW(
+      WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+      className,
+      "MALACHI UIA test fixture",
+      WS_OVERLAPPEDWINDOW,
+      48, 48, 320, 180,
+      IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
+    if (parent == IntPtr.Zero) {
+      throw new InvalidOperationException("CreateWindowExW(parent) failed: " + Marshal.GetLastWin32Error());
+    }
+
+    IntPtr button = CreateWindowExW(
+      0,
+      "BUTTON",
+      "Owned UIA button",
+      WS_CHILD | WS_VISIBLE,
+      24, 24, 160, 32,
+      parent, new IntPtr(101), instance, IntPtr.Zero);
+    if (button == IntPtr.Zero) {
+      throw new InvalidOperationException("CreateWindowExW(button) failed: " + Marshal.GetLastWin32Error());
+    }
+
+    // The Node child is intentionally launched with a hidden console. Windows can apply that
+    // STARTUPINFO show state to the process's first ShowWindow call, so make the second call the
+    // authoritative one. SW_SHOWNOACTIVATE keeps this owned test surface from stealing focus.
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    ShowWindow(parent, SW_SHOWNOACTIVATE);
+    UpdateWindow(parent);
+
+    RECT parentRect;
+    RECT buttonRect;
+    if (!IsWindowVisible(parent) || !IsWindowVisible(button) ||
+        !GetWindowRect(parent, out parentRect) || !GetWindowRect(button, out buttonRect) ||
+        parentRect.right <= parentRect.left || parentRect.bottom <= parentRect.top ||
+        buttonRect.right <= buttonRect.left || buttonRect.bottom <= buttonRect.top) {
+      throw new InvalidOperationException("Native UIA fixture did not become visible with non-zero bounds");
+    }
+
+    Console.WriteLine("READY:" + parent.ToInt64() + ":" + button.ToInt64());
+    Console.Out.Flush();
+
+    MSG message;
+    while (GetMessageW(out message, IntPtr.Zero, 0, 0) > 0) {
+      TranslateMessage(ref message);
+      DispatchMessageW(ref message);
+    }
+  }
 }
 '@
-$form = New-Object AmbientUiaFixture
-$form.Text = 'MALACHI UIA test fixture'
-$form.ShowInTaskbar = $false
-$form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-$form.Location = New-Object System.Drawing.Point(48,48)
-$form.ClientSize = New-Object System.Drawing.Size(320,180)
-$button = New-Object System.Windows.Forms.Button
-$button.Text = 'Owned UIA button'
-$button.AccessibleName = 'Owned UIA button'
-$button.Location = New-Object System.Drawing.Point(24,24)
-$button.Size = New-Object System.Drawing.Size(160,32)
-$form.Controls.Add($button)
-$form.Add_Shown({
-  # Node deliberately hides the PowerShell console. On hosted runners that STARTUPINFO flag can
-  # also win WinForms' first ShowWindow call: Shown fires and the HWND exists, but the fixture is
-  # still natively hidden. This second show happens after WinForms consumed the startup show state
-  # and explicitly reveals only our owned fixture without activating it.
-  $null = [AmbientFixtureNative]::ShowWindow($form.Handle, 4)
-  $null = $form.BeginInvoke([System.Action]{
-    # Force the owned child HWND + accessibility object on a real UI message-loop turn before
-    # handing its parent HWND to the production UIAutomationClient traversal.
-    $null = $button.Handle
-    $null = $button.AccessibilityObject
-    if (-not [AmbientFixtureNative]::IsWindowVisible($form.Handle)) {
-      [Console]::Error.WriteLine('UIA fixture form is not visible')
-      [Console]::Error.Flush()
-      $form.Close()
-      return
-    }
-    if (-not [AmbientFixtureNative]::IsWindowVisible($button.Handle)) {
-      [Console]::Error.WriteLine('UIA fixture button is not visible')
-      [Console]::Error.Flush()
-      $form.Close()
-      return
-    }
-    [Console]::WriteLine('READY:' + $form.Handle.ToInt64())
-    [Console]::Out.Flush()
-  })
-})
-[System.Windows.Forms.Application]::Run($form)
+[AmbientUiaFixture]::Run()
 `;
     const fixture = spawn(findWindowsPowerShell() ?? 'powershell.exe', [
       '-NoProfile', '-NonInteractive', '-NoLogo', '-STA', '-EncodedCommand',
@@ -169,13 +263,16 @@ $form.Add_Shown({
     let stderr = '';
     fixture.stderr.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk.toString('utf8')}`.slice(-2000); });
     try {
-      const window = await new Promise<number>((resolve, reject) => {
+      const owned = await new Promise<{ window: number; button: number }>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error(`UIA fixture did not become ready: ${stderr}`)), 15_000);
         let stdout = '';
         fixture.stdout.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf8');
-          const ready = stdout.match(/READY:(\d+)/);
-          if (ready) { clearTimeout(timer); resolve(Number(ready[1])); }
+          const ready = stdout.match(/READY:(\d+):(\d+)/);
+          if (ready) {
+            clearTimeout(timer);
+            resolve({ window: Number(ready[1]), button: Number(ready[2]) });
+          }
         });
         fixture.once('error', (error) => { clearTimeout(timer); reject(error); });
         fixture.once('exit', (code) => {
@@ -183,9 +280,15 @@ $form.Add_Shown({
           reject(new Error(`UIA fixture exited (${code}): ${stderr}`));
         });
       });
-      const result = await findUi({ window, query: 'Owned UIA button', role: 'Button', maxResults: 5 });
-      expect(result.window).toBe(window);
-      expect(result.elements.some((element) => element.name === 'Owned UIA button')).toBe(true);
+      const result = await findUi({ window: owned.window, query: 'Owned UIA button', role: 'Button', maxResults: 5 });
+      expect(result.window).toBe(owned.window);
+      if (!result.elements.some((element) => element.name === 'Owned UIA button')) {
+        const unfiltered = await findUi({ window: owned.window, maxResults: 20 });
+        throw new Error(
+          `Owned native BUTTON ${owned.button} missing from UIA ControlView; ` +
+          `filtered=${JSON.stringify(result.elements)} unfiltered=${JSON.stringify(unfiltered.elements)}`
+        );
+      }
       expect(result.elements.length).toBeLessThanOrEqual(5);
       expect(result.snapshotId).toBeGreaterThan(0);
       for (const element of result.elements) expect(element.ref).toMatch(/^g\d+_s\d+_e\d+$/);

@@ -280,12 +280,16 @@ describe('cross-platform packaging targets', () => {
       workflow.indexOf('      - name: Audit packaged macOS bundle metadata and Mach-O payloads')
     );
     expect(windowsGui).toContain('-ArgumentList "--user-data-dir=$profile"');
-    expect(windowsGui).toContain('Start-Sleep -Seconds 12');
+    expect(windowsGui).toContain('$deadline = $startedAt.AddSeconds(20)');
+    expect(windowsGui).toContain('Start-Sleep -Milliseconds 500');
+    expect(windowsGui).toContain('TotalSeconds -ge 10');
+    expect(windowsGui).toContain('while ([DateTime]::UtcNow -lt $deadline)');
     expect(windowsGui).toContain("'[info] app started'");
     expect(windowsGui).toContain("'[info] window loaded'");
     expect(windowsGui).toContain("'[info] renderer state ready'");
     expect(windowsGui).toContain("'[error] window failed to load'");
     expect(windowsGui).toContain("'[error] renderer:'");
+    expect(windowsGui).not.toContain('Start-Sleep -Seconds 12');
     expect(windowsGui).not.toContain('ELECTRON_RUN_AS_NODE');
 
     const debGui = workflow.slice(

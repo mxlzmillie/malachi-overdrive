@@ -196,10 +196,41 @@ jobs:
           $stderr = Join-Path $profile 'stderr.log'
           $env:CLF_DEBUG = '1'
           $process = Start-Process -FilePath $installedExe -ArgumentList "--user-data-dir=$profile" -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-          Start-Sleep -Seconds 12
+          $startedAt = [DateTime]::UtcNow
+          $deadline = $startedAt.AddSeconds(20)
+          $ready = $false
+          $failureMessage = $null
+          while ([DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            $process.Refresh()
+            if ($process.HasExited) {
+              $failureMessage = "Installed Windows GUI exited before renderer readiness"
+              break
+            }
+            $output = ''
+            if (Test-Path -LiteralPath $stdout) { $output += Get-Content -LiteralPath $stdout -Raw }
+            if (Test-Path -LiteralPath $stderr) { $output += Get-Content -LiteralPath $stderr -Raw }
+            foreach ($failure in @('[error] window failed to load', '[error] renderer:')) {
+              if ($output.Contains($failure)) {
+                $failureMessage = "Installed Windows GUI reported $failure"
+                break
+              }
+            }
+            if ($failureMessage) { break }
+            $markersReady = $true
+            foreach ($marker in @('[info] app started', '[info] window loaded', '[info] renderer state ready')) {
+              if (-not $output.Contains($marker)) { $markersReady = $false }
+            }
+            if ($markersReady -and (([DateTime]::UtcNow - $startedAt).TotalSeconds -ge 10)) {
+              $ready = $true
+              break
+            }
+          }
+          if (-not $ready -and -not $failureMessage) {
+            $failureMessage = "Installed Windows GUI did not become renderer-ready within 20 seconds"
+          }
           $process.Refresh()
-          $exitedEarly = $process.HasExited
-          if (-not $exitedEarly) {
+          if (-not $process.HasExited) {
             & taskkill.exe /PID $process.Id /T /F | Out-Null
             Start-Sleep -Milliseconds 500
           }
@@ -207,15 +238,7 @@ jobs:
           if (Test-Path -LiteralPath $stdout) { $output += Get-Content -LiteralPath $stdout -Raw }
           if (Test-Path -LiteralPath $stderr) { $output += Get-Content -LiteralPath $stderr -Raw }
           Write-Host $output
-          if ($exitedEarly) {
-            throw "Installed Windows GUI exited before the intentional 12-second smoke window"
-          }
-          foreach ($marker in @('[info] app started', '[info] window loaded', '[info] renderer state ready')) {
-            if (-not $output.Contains($marker)) { throw "Installed Windows GUI did not report $marker" }
-          }
-          foreach ($failure in @('[error] window failed to load', '[error] renderer:')) {
-            if ($output.Contains($failure)) { throw "Installed Windows GUI reported $failure" }
-          }
+          if ($failureMessage) { throw $failureMessage }
 
       - name: Audit packaged macOS bundle metadata and Mach-O payloads
         if: matrix.platform == 'darwin'

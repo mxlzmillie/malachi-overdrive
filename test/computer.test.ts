@@ -106,6 +106,16 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing,System -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class AmbientFixtureNative {
+  [DllImport("user32.dll")]
+  public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")]
+  public static extern bool IsWindowVisible(IntPtr hWnd);
+}
+
 public sealed class AmbientUiaFixture : System.Windows.Forms.Form {
   protected override bool ShowWithoutActivation { get { return true; } }
 }
@@ -113,6 +123,8 @@ public sealed class AmbientUiaFixture : System.Windows.Forms.Form {
 $form = New-Object AmbientUiaFixture
 $form.Text = 'MALACHI UIA test fixture'
 $form.ShowInTaskbar = $false
+$form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+$form.Location = New-Object System.Drawing.Point(48,48)
 $form.ClientSize = New-Object System.Drawing.Size(320,180)
 $button = New-Object System.Windows.Forms.Button
 $button.Text = 'Owned UIA button'
@@ -121,16 +133,31 @@ $button.Location = New-Object System.Drawing.Point(24,24)
 $button.Size = New-Object System.Drawing.Size(160,32)
 $form.Controls.Add($button)
 $form.Add_Shown({
-  # Shown fires before some WinForms accessibility providers have published their child tree.
-  # Let one real message-loop interval elapse before the Node side starts querying UIA.
-  $script:readyTimer = New-Object System.Windows.Forms.Timer
-  $script:readyTimer.Interval = 250
-  $script:readyTimer.Add_Tick({
-    $script:readyTimer.Stop()
+  # Node deliberately hides the PowerShell console. On hosted runners that STARTUPINFO flag can
+  # also win WinForms' first ShowWindow call: Shown fires and the HWND exists, but the fixture is
+  # still natively hidden. This second show happens after WinForms consumed the startup show state
+  # and explicitly reveals only our owned fixture without activating it.
+  $null = [AmbientFixtureNative]::ShowWindow($form.Handle, 4)
+  $null = $form.BeginInvoke([System.Action]{
+    # Force the owned child HWND + accessibility object on a real UI message-loop turn before
+    # handing its parent HWND to the production UIAutomationClient traversal.
+    $null = $button.Handle
+    $null = $button.AccessibilityObject
+    if (-not [AmbientFixtureNative]::IsWindowVisible($form.Handle)) {
+      [Console]::Error.WriteLine('UIA fixture form is not visible')
+      [Console]::Error.Flush()
+      $form.Close()
+      return
+    }
+    if (-not [AmbientFixtureNative]::IsWindowVisible($button.Handle)) {
+      [Console]::Error.WriteLine('UIA fixture button is not visible')
+      [Console]::Error.Flush()
+      $form.Close()
+      return
+    }
     [Console]::WriteLine('READY:' + $form.Handle.ToInt64())
     [Console]::Out.Flush()
   })
-  $script:readyTimer.Start()
 })
 [System.Windows.Forms.Application]::Run($form)
 `;
@@ -156,12 +183,7 @@ $form.Add_Shown({
           reject(new Error(`UIA fixture exited (${code}): ${stderr}`));
         });
       });
-      const deadline = Date.now() + 5_000;
-      let result = await findUi({ window, query: 'Owned UIA button', role: 'Button', maxResults: 5 });
-      while (!result.elements.some((element) => element.name === 'Owned UIA button') && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        result = await findUi({ window, query: 'Owned UIA button', role: 'Button', maxResults: 5 });
-      }
+      const result = await findUi({ window, query: 'Owned UIA button', role: 'Button', maxResults: 5 });
       expect(result.window).toBe(window);
       expect(result.elements.some((element) => element.name === 'Owned UIA button')).toBe(true);
       expect(result.elements.length).toBeLessThanOrEqual(5);

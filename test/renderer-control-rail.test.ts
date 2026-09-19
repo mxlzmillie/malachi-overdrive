@@ -109,7 +109,7 @@ describe('Control Rail projection', () => {
       expect.objectContaining({ path: 'artifacts/report.pdf', indicator: 'created' }),
       expect.objectContaining({ path: 'src/renderer/chat.ts', indicator: 'read' })
     ]));
-    expect(snapshot.agents.find(row => row.id === 'worker-1')).toEqual(expect.objectContaining({ model: 'gpt-6-pro', reasoningEffort: 'pro', sessionId: worker.id }));
+    expect(snapshot.agents.find(row => row.id === 'worker-1')).toEqual(expect.objectContaining({ model: null, reasoningEffort: null, sessionId: worker.id }));
     expect(snapshot.queue).toHaveLength(1);
     expect(snapshot.browser.facts.find(row => row.id === 'catalog')?.value).toContain('3 choices');
     expect(snapshot.issues.some(row => row.title === 'npm test')).toBe(false);
@@ -127,6 +127,23 @@ describe('Control Rail projection', () => {
     expect(snapshot.agents[0]?.model).toBeNull();
     expect(snapshot.facts.find(row => row.id === 'model')?.value).toBe('Unknown');
     expect(snapshot.issues).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'browser-offline', title: 'Browser disconnected' })]));
+  });
+  it('does not adopt a different live swarm when a same-name historical worker is selected', () => {
+    const worker = session({ id: 'old-worker', conversationId: 'old-worker-chat', selectedModel: undefined,
+      origin: { kind: 'worker', fromSessionId: 'old-prime', agentId: 'worker-1', task: 'Old task' } });
+    const projected = projectControlRail({ state: state(), session: worker, workerSessions: [worker], events: [], swarm: swarm(), queue: [], project: null,
+      pressure: null, working: false, blocked: false, currentModel: null, modelCatalog: { state: 'unknown', observedAt: null, count: 0 }, now: T0 });
+    expect(projected.agents).toHaveLength(1);
+    expect(projected.agents[0]).toMatchObject({ id: 'worker-1', sessionId: 'old-worker', state: 'idle', task: 'Current conversation' });
+    expect(JSON.stringify(projected.agents)).not.toContain('Run the renderer checks');
+  });
+  it('joins the exact live worker but never opens its recording as the prime', () => {
+    const worker = session({ id: 'live-worker', conversationId: 'chat-worker', selectedModel: undefined,
+      origin: { kind: 'worker', fromSessionId: '2026-09-16-prime0001', agentId: 'worker-1', task: 'Run the renderer checks' } });
+    const projected = projectControlRail({ state: state(), session: worker, workerSessions: [worker], events: [], swarm: swarm(), queue: [], project: null,
+      pressure: null, working: true, blocked: false, currentModel: null, modelCatalog: { state: 'unknown', observedAt: null, count: 0 }, now: T0 });
+    expect(projected.agents.find(row => row.id === 'worker-1')).toMatchObject({ sessionId: worker.id, state: 'active' });
+    expect(projected.agents.find(row => row.id === 'prime')?.sessionId).toBeUndefined();
   });
 });
 
@@ -153,6 +170,8 @@ describe('Control Rail interactions', () => {
     const rail = createControlRail({ host, toggle, loadWorker: async () => ({ events: [] }), renderWorker: () => [], openMain: vi.fn(), copyPath: async () => true,
       actions: { newTask: vi.fn(), commands: vi.fn(), projectFiles: vi.fn(), activity: vi.fn(), openChat: vi.fn(), refreshModels: vi.fn(), setup: vi.fn() } });
     rail.update(snapshot()); rail.open();
+    expect(document.activeElement).toBe(host.querySelector('.control-rail-close'));
+    document.querySelector<HTMLElement>('#draft')!.focus();
     const scroller = host.querySelector<HTMLElement>('.control-rail-scroll')!; scroller.scrollTop = 87;
     const outputs = host.querySelector<HTMLDetailsElement>('[data-section="outputs"]')!; outputs.open = false;
     rail.update({ ...snapshot(T0 + 1000), activity: [{ id: 'a', title: 'Edited file', kind: 'edit', tone: 'neutral', time: T0 }] });
@@ -160,6 +179,7 @@ describe('Control Rail interactions', () => {
     expect(outputs.open).toBe(false);
     expect((document.querySelector('#draft') as HTMLInputElement).value).toBe('do not lose me');
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(document.querySelector('#draft'));
   });
 
   it('opens the existing worker transcript inside the rail and Escape returns focus to the rail toggle', async () => {
@@ -174,42 +194,55 @@ describe('Control Rail interactions', () => {
     expect(renderWorker).toHaveBeenCalledOnce();
     host.querySelector<HTMLElement>('#controlRail')!.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(host.querySelector<HTMLElement>('.control-rail-inspector')!.hidden).toBe(true);
+    expect(document.activeElement).toBe(host.querySelector<HTMLButtonElement>('.control-rail-agent'));
     host.querySelector<HTMLElement>('#controlRail')!.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(host.querySelector<HTMLElement>('#controlRail')!.hidden).toBe(true);
     expect(document.activeElement).toBe(toggle);
   });
 
-  it('keeps the page free with a compact ambient preview and opens the full workbench only on request', () => {
-    dom = new JSDOM('<div class="app"><main id="page">Keep using this page</main><button id="toggle"></button></div>', { pretendToBeVisual: true });
+  it('refreshes a selected worker without reopening the dismissed workbench or taking composer focus', async () => {
+    dom = new JSDOM('<div class="app"><textarea id="draft">Untouched</textarea><button id="toggle"></button></div>', { pretendToBeVisual: true });
     Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node });
     const host = document.querySelector<HTMLElement>('.app')!, toggle = document.querySelector<HTMLButtonElement>('#toggle')!;
-    const rail = createControlRail({ host, toggle, loadWorker: async () => ({ events: [] }), renderWorker: () => [], openMain: vi.fn(), copyPath: async () => true,
+    const loadWorker = vi.fn(async () => ({ events: [] }));
+    const rail = createControlRail({ host, toggle, loadWorker, renderWorker: () => [], openMain: vi.fn(), copyPath: async () => true,
       actions: { newTask: vi.fn(), commands: vi.fn(), projectFiles: vi.fn(), activity: vi.fn(), openChat: vi.fn(), refreshModels: vi.fn(), setup: vi.fn() } });
-    rail.update(snapshot());
-    expect(host.classList.contains('has-control-rail')).toBe(false);
-    expect(host.querySelector<HTMLElement>('.ambient-edge')?.dataset.tone).toBe('live');
-    host.querySelector<HTMLButtonElement>('.ambient-edge-main')!.click();
-    expect(rail.isPeekOpen()).toBe(true);
-    expect(host.querySelector<HTMLElement>('.ambient-peek')!.hidden).toBe(false);
-    expect(host.querySelector<HTMLElement>('#controlRail')!.hidden).toBe(true);
-    expect(host.querySelector('#page')?.textContent).toBe('Keep using this page');
-    host.querySelector<HTMLButtonElement>('.ambient-peek-primary')!.click();
-    expect(rail.isPeekOpen()).toBe(false);
-    expect(rail.isOpen()).toBe(true);
+    rail.update(snapshot()); await rail.openWorker('worker-session'); rail.hide();
+    document.querySelector<HTMLElement>('#draft')!.focus();
+    rail.update(snapshot(T0 + 1000)); await Promise.resolve();
+    expect(loadWorker).toHaveBeenCalledTimes(2);
+    expect(rail.isOpen()).toBe(false); expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(document.querySelector('#draft'));
+    expect(document.querySelector<HTMLTextAreaElement>('#draft')!.value).toBe('Untouched');
   });
 
-  it('announces a real completion transition without opening either surface', () => {
-    vi.useFakeTimers();
+  it('defers a passive worker transcript refresh while an interaction inside it has focus', async () => {
     dom = new JSDOM('<div class="app"><button id="toggle"></button></div>', { pretendToBeVisual: true });
     Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node });
     const host = document.querySelector<HTMLElement>('.app')!, toggle = document.querySelector<HTMLButtonElement>('#toggle')!;
-    const rail = createControlRail({ host, toggle, loadWorker: async () => ({ events: [] }), renderWorker: () => [], openMain: vi.fn(), copyPath: async () => true,
+    const loadWorker = vi.fn(async () => ({ events: [] }));
+    const renderWorker = vi.fn(() => { const action = document.createElement('button'); action.textContent = 'Transcript action'; return [action]; });
+    const rail = createControlRail({ host, toggle, loadWorker, renderWorker, openMain: vi.fn(), copyPath: async () => true,
       actions: { newTask: vi.fn(), commands: vi.fn(), projectFiles: vi.fn(), activity: vi.fn(), openChat: vi.fn(), refreshModels: vi.fn(), setup: vi.fn() } });
-    rail.update(snapshot()); rail.update({ ...snapshot(), runState: 'COMPLETE', outputs: [{ id: 'out', title: 'Project files', type: 'File', time: T0, status: 'created' }] });
-    expect(host.querySelector<HTMLElement>('.ambient-complete')!.hidden).toBe(false);
-    expect(host.querySelector('.ambient-complete')?.textContent).toContain('Project files is ready');
-    expect(rail.isOpen()).toBe(false); expect(rail.isPeekOpen()).toBe(false);
-    vi.advanceTimersByTime(7000); expect(host.querySelector<HTMLElement>('.ambient-complete')!.hidden).toBe(true);
-    vi.useRealTimers();
+    rail.update(snapshot()); await rail.openWorker('worker-session');
+    const transcriptAction = host.querySelector<HTMLButtonElement>('.control-rail-inspector-body button')!; transcriptAction.focus();
+    rail.update(snapshot(T0 + 1000)); await Promise.resolve();
+    expect(loadWorker).toHaveBeenCalledTimes(1); expect(document.activeElement).toBe(transcriptAction);
+    host.querySelector<HTMLButtonElement>('.control-rail-inspector-head button')!.focus(); await Promise.resolve(); await Promise.resolve();
+    expect(loadWorker).toHaveBeenCalledTimes(2); expect(renderWorker).toHaveBeenCalledTimes(2);
   });
+
+  it('supports keyboard resizing on the explicit workbench separator', () => {
+    dom = new JSDOM('<div class="app"><button id="toggle"></button></div>', { pretendToBeVisual: true });
+    Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node });
+    const host = document.querySelector<HTMLElement>('.app')!, toggle = document.querySelector<HTMLButtonElement>('#toggle')!;
+    createControlRail({ host, toggle, loadWorker: async () => ({ events: [] }), renderWorker: () => [], openMain: vi.fn(), copyPath: async () => true,
+      actions: { newTask: vi.fn(), commands: vi.fn(), projectFiles: vi.fn(), activity: vi.fn(), openChat: vi.fn(), refreshModels: vi.fn(), setup: vi.fn() } });
+    const separator = host.querySelector<HTMLElement>('.control-rail-resize')!;
+    separator.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    expect(host.style.getPropertyValue('--control-rail-width')).toBe('408px'); expect(separator.getAttribute('aria-valuenow')).toBe('408');
+    separator.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+    expect(host.style.getPropertyValue('--control-rail-width')).toBe('360px');
+  });
+
 });

@@ -104,8 +104,8 @@ it('opens an enrolled exact App Id directly in marked settings without name disc
     chrome: { storage: { session: { get: async () => ({}), set: async () => {} } }, tabs: { query: async () => [] } }
   });
   vm.runInContext(`${code}\nglobalThis.run = inspectRequestedPluginRefresh;`, context);
-  await (context.run as Function)([{ surface: 'core' }], true);
-  expect(create).toHaveBeenCalledExactlyOnceWith(`https://chatgpt.com/?cos-plugin-refresh=${id}#settings/Plugins/plugin_asdk_app_synthetic`, true);
+  await (context.run as Function)([{ surface: 'core' }], false);
+  expect(create).toHaveBeenCalledExactlyOnceWith(`https://chatgpt.com/?cos-plugin-refresh=${id}#settings/Plugins/plugin_asdk_app_synthetic`);
 });
 it.each([{ deny: true }, { navigateDuringClaim: true }])('never clicks after denied claim or changed navigation: %j', async options => {
   const h = workflow(options);
@@ -117,16 +117,17 @@ it('reuses one owned management tab and preserves unreachable helpers and user c
   const background = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
   const code = background.slice(background.indexOf('let pluginRefreshFlight = null;'), background.indexOf('async function catalogProbe('));
   let requests: object[] = [{ id }];
-  const tabs = [{ id: 7, url: `https://chatgpt.com/?cos-plugin-refresh=${id}#settings/Plugins` }, { id: 8, url: 'https://chatgpt.com/c/user-conversation' }];
+  const tabs = [{ id: 7, windowId: 80, url: `https://chatgpt.com/?cos-plugin-refresh=${id}#settings/Plugins` }, { id: 8, windowId: 3, url: 'https://chatgpt.com/c/user-conversation' }];
   const create = vi.fn(async () => ({ id: 9 }));
   const remove = vi.fn();
   const sendMessage = vi.fn(async (): Promise<object> => ({ ok: true }));
   const context = vm.createContext({ URL, setTimeout, clearTimeout, CHATGPT_TAB_URLS: ['https://chatgpt.com/*'],
     call: async () => ({ ok: true, data: { requests } }), createChatTab: create,
+    isolatedWorkerTab: async (candidate: typeof tabs[number]) => candidate?.id === 7 && candidate.windowId === 80,
     chrome: { storage: { session: { get: async () => ({}), set: async () => {} } }, tabs: { query: async () => tabs, get: async (id: number) => tabs.find(tab => tab.id === id), remove, sendMessage } }
   });
   vm.runInContext(`${code}\nglobalThis.run = inspectRequestedPluginRefresh;`, context);
-  const run = () => (context.run as Function)([{ surface: 'core' }], true);
+  const run = () => (context.run as Function)([{ surface: 'core' }], false);
   await Promise.all([run(), run()]);
   expect(create).not.toHaveBeenCalled();
   expect(sendMessage).toHaveBeenCalledTimes(1);

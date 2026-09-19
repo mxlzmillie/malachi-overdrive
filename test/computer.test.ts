@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
+import { findWindowsPowerShell } from '../src/main/exec.js';
 import {
   act,
   actAndCapture,
@@ -97,12 +99,59 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('queries Windows UI Automation without requiring a screenshot', async () => {
-    const result = await findUi({ role: 'Button', maxResults: 5 });
-    expect(result.window).toBeGreaterThan(0);
-    expect(Array.isArray(result.elements)).toBe(true);
-    expect(result.elements.length).toBeLessThanOrEqual(5);
-    expect(result.snapshotId).toBeGreaterThan(0);
-    for (const element of result.elements) expect(element.ref).toMatch(/^g\d+_s\d+_e\d+$/);
+    // The ARM64 release runner timed out in an unrelated foreground UIA provider. This
+    // query tests our protocol, so own its window and require an exact HWND + known control;
+    // neither the runner's foreground nor an empty result is evidence that UIA works.
+    const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing,System -TypeDefinition @'
+public sealed class AmbientUiaFixture : System.Windows.Forms.Form {
+  protected override bool ShowWithoutActivation { get { return true; } }
+}
+'@
+$form = New-Object AmbientUiaFixture
+$form.Text = 'MALACHI UIA test fixture'
+$form.ShowInTaskbar = $false
+$button = New-Object System.Windows.Forms.Button
+$button.Text = 'Owned UIA button'
+$button.AccessibleName = 'Owned UIA button'
+$form.Controls.Add($button)
+$form.Add_Shown({ [Console]::WriteLine('READY:' + $form.Handle.ToInt64()); [Console]::Out.Flush() })
+[System.Windows.Forms.Application]::Run($form)
+`;
+    const fixture = spawn(findWindowsPowerShell() ?? 'powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-NoLogo', '-STA', '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64')
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const closed = new Promise<void>((resolve) => fixture.once('close', () => resolve()));
+    let stderr = '';
+    fixture.stderr.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk.toString('utf8')}`.slice(-2000); });
+    try {
+      const window = await new Promise<number>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`UIA fixture did not become ready: ${stderr}`)), 15_000);
+        let stdout = '';
+        fixture.stdout.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString('utf8');
+          const ready = stdout.match(/READY:(\d+)/);
+          if (ready) { clearTimeout(timer); resolve(Number(ready[1])); }
+        });
+        fixture.once('error', (error) => { clearTimeout(timer); reject(error); });
+        fixture.once('exit', (code) => {
+          clearTimeout(timer);
+          reject(new Error(`UIA fixture exited (${code}): ${stderr}`));
+        });
+      });
+      const result = await findUi({ window, role: 'Button', maxResults: 5 });
+      expect(result.window).toBe(window);
+      expect(result.elements.some((element) => element.name === 'Owned UIA button')).toBe(true);
+      expect(result.elements.length).toBeLessThanOrEqual(5);
+      expect(result.snapshotId).toBeGreaterThan(0);
+      for (const element of result.elements) expect(element.ref).toMatch(/^g\d+_s\d+_e\d+$/);
+    } finally {
+      fixture.kill();
+      await closed;
+    }
   });
 
   it('returns a Codex-style window state with semantic UI refs', async () => {

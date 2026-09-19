@@ -1,4 +1,5 @@
 import { projectFiles, projectFilePreview } from './project-files.js';
+import { ambientText, controlAmbientWork, getAmbientWork, invalidateAmbientWork, onAmbientWorkChange, resolveAmbientOutput } from './ambient-work.js';
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
 import { noteChatOrigin } from './session/recorder.js';
 import { REASONING_EFFORTS } from '../shared/session.js';
@@ -13,14 +14,13 @@ import { recordDeliveredInput, recordedInputImage } from './session/input-histor
 import { codingAgentDeliveryText } from './session/input-instructions.js';
 import { UI_BASE_ZOOM, titleBarOverlayForTheme } from './window-layout.js';
 import { usageOverview } from './session/usage.js';
-import { inputArgs, inputTextSchema, listInputs, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
+import { inputArgs, inputTextSchema, listInputs, onInputChange, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
 import { draftOpeningMessage, goalRuntimeAvailable, onGoalChange, nativeGoalFailure } from './goal.js';
 import { cancelTaskRequest, runTaskRequest } from './task-request.js';
 import { randomUUID } from 'node:crypto';
 import { retryGoalBrowserHelper } from './goal.js';
 import { requestBrowserPreferences } from './browser-preferences.js';
 import { sendDesktopInput, cancelDesktopInput, retryQueuedInputBrowser } from './session/start-input.js';
-import { wakeBrowserUrl } from './browser-startup.js';
 import { registerPluginIpc } from './plugins-ipc.js';
 /**
  * IPC surface.
@@ -59,11 +59,12 @@ import {
   bridgePairingCode,
   bridgeStatus,
   bridgeStatusWithoutCredentials,
+  browserWakeConnected,
   sessionActivityExpiresAt,
   sessionHasInputActivity,
   sessionControlsFor, stopSessionTurn, setSessionAutomation, setSessionObjective, compactSession, cancelSessionCompaction,
+  requestWorkerChatReveal,
   cancelWorkerCommands,
-  chatUrl,
   onBridgeChange,
   startBridge,
   stopBridge,
@@ -95,7 +96,6 @@ import {
 import { tokenPressure } from '../shared/session.js';
 import { forgetWorkspaceRoot, renameWorkspaceRoot } from './workspace.js';
 import { hostPlatformInfo } from './platform.js';
-import { openInPreferredBrowser } from './browser.js';
 import { markInstallOnQuit, onUpdateChange, updateStatus } from './update.js';
 import {
   getMacOSDesktopAccess,
@@ -135,6 +135,7 @@ const settingsPatch = z.object({
     binaryPath: z.string().max(4096)
   }),
   ui: z.object({
+    ambientNotifications: z.boolean().optional(),
     chatBrowser: z.enum(CHAT_BROWSERS).optional(),
     developerMode: z.boolean().optional(),
     finishTool: z.boolean().optional(),
@@ -252,6 +253,7 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
       binaryPath: pick(current.tunnel.binaryPath, base.tunnel.binaryPath, wanted.tunnel.binaryPath)
     },
     ui: {
+      ambientNotifications: pick(current.ui.ambientNotifications, base.ui.ambientNotifications, wanted.ui.ambientNotifications),
       chatBrowser: pick(current.ui.chatBrowser, base.ui.chatBrowser, wanted.ui.chatBrowser),
       developerMode: pick(current.ui.developerMode, base.ui.developerMode, wanted.ui.developerMode),
       finishTool: pick(current.ui.finishTool, base.ui.finishTool, wanted.ui.finishTool),
@@ -817,6 +819,22 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const { id, expectedTurnId } = sessionIdArg.extend({ expectedTurnId: z.string().min(1).max(256) }).parse(payload);
     return stopSessionTurn(id, expectedTurnId);
   });
+  handle('ambient:get', async () => getAmbientWork());
+  handle('ambient:control', async payload => {
+    const request = z.object({
+    sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+    conversationId: z.string().min(1).max(256), turnId: z.string().min(1).max(256).nullable(),
+    action: z.enum(['pause', 'resume', 'stop', 'retry', 'foreground']), inputId: z.string().uuid().optional()
+    }).strict().parse(payload);
+    try { return await controlAmbientWork(request); }
+    catch (error) { throw new Error(ambientText(error instanceof Error ? error.message : 'Task control could not be confirmed.')); }
+  });
+  handle('ambient:openOutput', async payload => {
+    const input = z.object({ sessionId: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i),
+      eventSeq: z.number().int().positive(), outputIndex: z.number().int().nonnegative().max(10000) }).strict().parse(payload);
+    try { shell.showItemInFolder(await resolveAmbientOutput(input)); return true; }
+    catch { throw new Error('This recorded output is not available within a currently approved project.'); }
+  });
   handle('sessions:releaseFinish', async (payload) => {
     const { id, expectedTurnId } = sessionIdArg.extend({ expectedTurnId: z.string().min(1).max(256) }).parse(payload);
     await sessionControlsFor(id);
@@ -885,8 +903,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     if (!conversationId || !/^[0-9a-z-]{8,64}$/i.test(conversationId)) {
       throw new Error('This session has no valid ChatGPT conversation');
     }
-    await openInPreferredBrowser(chatUrl(conversationId));
-    return true;
+    return requestWorkerChatReveal(conversationId);
   });
 
   /**
@@ -1044,13 +1061,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   };
   configureInputDelivery({
     hasActivity: sessionHasInputActivity,
-    wakeDecision: async (entry, signal) => {
+    wakeDecision: async (_entry, signal) => {
       signal.throwIfAborted();
       if (!await startBridge()) throw new Error('The browser bridge could not start');
       signal.throwIfAborted();
-      const marker = `cos-input=${encodeURIComponent(entry.id)}`;
-      await wakeBrowserUrl(entry.conversationId ? `https://chatgpt.com/c/${encodeURIComponent(entry.conversationId)}`
-        : `https://chatgpt.com/?${entry.lifetime === 'temporary-planner' ? 'temporary-chat=true&' : ''}${marker}#${marker}`);
+      if (!browserWakeConnected()) throw new Error('BACKGROUND_UNAVAILABLE: Connect the browser extension to continue background work. No foreground browser will be opened.');
+      wakeBrowserWork();
     },
     bindHelper: async (conversationId, fromSessionId) => {
       const source = fromSessionId ? await getSession(fromSessionId) : null;
@@ -1117,13 +1133,21 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       return drafted;
     }, publish);
   });
-  configureChatModelDiscovery({ changed: () => push('chatModels:changed', getChatModels()), wake: async (nonce, allowOpen) => {
+  configureChatModelDiscovery({ changed: () => push('chatModels:changed', getChatModels()), wake: async () => {
     if (!await startBridge()) throw new Error('The browser bridge could not start');
-    if (allowOpen) await wakeBrowserUrl(`https://chatgpt.com/?cos-model-catalog=${nonce}`, true, true);
+    if (!browserWakeConnected()) throw new Error('BACKGROUND_UNAVAILABLE: Connect the browser extension to discover models in the background. No foreground browser will be opened.');
+    wakeBrowserWork();
   } });
   onUpdateChange(pushState);
   onMacOSDesktopAccessChange(pushState);
   onLog((entry) => push('log:entry', entry));
   onSessionChange(() => push('session:changed'));
   onSwarmChange(() => push('swarm:changed', swarmState()));
+  onAmbientWorkChange(value => push('ambient:changed', value));
+  onSessionChange(invalidateAmbientWork);
+  onSwarmChange(invalidateAmbientWork);
+  onInputChange(invalidateAmbientWork);
+  onGoalChange(invalidateAmbientWork);
+  onBridgeChange(invalidateAmbientWork);
+  onStatusChange(invalidateAmbientWork);
 }

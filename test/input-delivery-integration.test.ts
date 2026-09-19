@@ -3,6 +3,7 @@ import { finishInstruction } from '../src/shared/finish.js';
 import { CODING_AGENT_TRANSPORT_CONTRACT, STANDING_INSTRUCTIONS_HEADING, codingAgentDeliveryText } from '../src/main/session/input-instructions.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { WebSocket } from 'ws';
 import { APP_VERSION, BRIDGE_PROTOCOL } from '../src/main/version.js';
 import * as browserWake from '../src/main/browser-wake.js';
 type Handler = (event: unknown, payload: unknown) => Promise<any>;
@@ -34,11 +35,18 @@ const goal = await import('../src/main/goal.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 let directory: string;
 let bearer: string;
+let wakeSocket: WebSocket | null = null;
 const pushed = vi.fn();
 async function post(route: string, body: unknown) {
+  // HTTP claims in this integration suite stand in for the extension after it has
+  // proved that the current document lives in the app-owned isolated work surface.
+  // Dedicated bridge/extension tests cover the fail-closed missing-isolation path.
+  const payload = route === '/input/claim' && body && typeof body === 'object' && !Array.isArray(body)
+    ? { ...(body as Record<string, unknown>), isolated: true }
+    : body;
   const response = await fetch(`http://127.0.0.1:${bridgePort()}${route}`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-extension-version': APP_VERSION,
-      'x-extension-protocol': String(BRIDGE_PROTOCOL), ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: JSON.stringify(body)
+      'x-extension-protocol': String(BRIDGE_PROTOCOL), ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: JSON.stringify(payload)
   });
   return { status: response.status, body: await response.json() as any };
 }
@@ -51,6 +59,17 @@ beforeAll(async () => {
   const paired = await post('/pair', { code: bridgePairingCode() });
   expect(paired.status).toBe(200);
   bearer = paired.body.token;
+  wakeSocket = new WebSocket(`ws://127.0.0.1:${bridgePort()}/wake`);
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('wake_socket_timeout')), 5000);
+    wakeSocket!.once('error', reject);
+    wakeSocket!.once('open', () => wakeSocket!.send(bearer));
+    wakeSocket!.on('message', bytes => {
+      const message = bytes.toString();
+      if (message === 'ping') wakeSocket?.send('pong');
+      if (message === 'wake') { clearTimeout(timeout); resolve(); }
+    });
+  });
 });
 beforeEach(async () => {
   await writeDurableNow('session-input', []);
@@ -117,6 +136,7 @@ it('completes only an explicitly temporary planner over HTTP without inventing a
   expect((await input.listInputs())[0]).toMatchObject({ conversationId: null, deliveredSessionId: null, state: 'sent' });
 });
 afterAll(async () => {
+  wakeSocket?.close(); wakeSocket = null;
   await stopBridge(); await flushDurable(); resetSessionStoreForTests(); resetDurableForTests();
   await removeTempDir(directory);
 });

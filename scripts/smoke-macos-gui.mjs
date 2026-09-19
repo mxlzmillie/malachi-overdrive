@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 if (process.platform !== 'darwin') {
@@ -18,8 +19,9 @@ const executable = path.resolve(
   'MALACHI OVERDRIVE'
 );
 if (!existsSync(executable)) throw new Error(`Could not find unpacked macOS ${arch} app executable`);
+const userDataDir = mkdtempSync(path.join(tmpdir(), 'malachi-overdrive-gui-smoke-'));
 
-const child = spawn(executable, [], {
+const child = spawn(executable, [`--user-data-dir=${userDataDir}`], {
   stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, CLF_DEBUG: '1' }
 });
@@ -104,6 +106,7 @@ async function terminateChild() {
 // Whether startup passed or failed, never leave an Electron child behind on the hosted runner.
 // This tests launch readiness, not the application's own quit flow.
 const exited = await terminateChild();
+rmSync(userDataDir, { recursive: true, force: true });
 process.stdout.write(output);
 if (startupError) {
   if (!exited) startupError.message += '; child also resisted SIGTERM/SIGKILL';

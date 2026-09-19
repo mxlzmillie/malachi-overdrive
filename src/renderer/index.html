@@ -6,6 +6,7 @@
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./command-center.css" />
     <link rel="stylesheet" href="./control-rail.css" />
+    <link rel="stylesheet" href="./ambient-work.css" />
   </head>
   <body>
     <!-- Icon sprite. Inline so there is no request and no font, and every glyph
@@ -652,6 +653,7 @@
                 <div class="pane">
                   <label class="setting"><span class="setting-text"><b>ChatGPT browser</b><em>Used when the app launches a browser. Install the companion and sign in to ChatGPT in this browser's active profile. Already connected tabs stay in their browser.</em></span><select id="chatBrowser"><option value="chrome">Google Chrome / Chromium</option><option value="edge">Microsoft Edge</option><option value="brave">Brave Browser</option><option value="opera-air">Opera Air</option></select></label>
                   <label class="setting"><span class="setting-text"><b>Background chats</b><em>Keep app-created ChatGPT tabs in the background.</em></span><input id="backgroundChats" type="checkbox" /></label>
+                  <label class="setting"><span class="setting-text"><b>Ambient completion notices</b><em>Show a quiet notice when work finishes. Worker isolation stays on regardless of browser preferences.</em></span><input id="ambientNotifications" type="checkbox" /></label>
                   <label class="setting"><span class="setting-text"><b>Automatic plugin refresh</b><em>Let the companion refresh changed connector tools in ChatGPT. Off by default; manual refresh remains available in ChatGPT.</em></span><input id="autoRefreshPlugins" type="checkbox" /></label>
                   <label class="setting"><span class="setting-text"><b>Browser only</b><em>Do not open tabs for automatic plugin refresh or chat recovery. Explicit new chats, workers and Reload models still work.</em></span><input id="browserOnly" type="checkbox" /></label>
                   <p class="muted">Idle app-created tabs close after two minutes. Sleeping worker tabs can close earlier when the worker limit is exceeded. Active turns and unsent drafts stay open.</p>

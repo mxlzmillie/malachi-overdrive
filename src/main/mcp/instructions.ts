@@ -16,12 +16,14 @@ import { isGitRepository } from '../toolchain.js';
 import type { ToolContext } from './kernel.js';
 import { surfaceDefinition, type SurfaceId } from './surfaces.js';
 
+const backgroundPolicy = 'Work in the background. Never use shell commands, scripts or plugins to open/focus native windows, control physical input or read the clipboard. If needed, ask the user to choose Allow foreground control for this exact task in Ambient Work Mode, then use Desktop.';
+
 export function serverInstructions(
   ctx: ToolContext,
   surface: SurfaceId = 'core',
   platform: NodeJS.Platform = process.platform
 ): string {
-  if (surface === 'plugins') return 'External MCP tools enabled by the user in MALACHI OVERDRIVE. Each tool retains its upstream schema and annotations. External servers run with their own operating-system or service permissions; MALACHI OVERDRIVE approved folders do not sandbox them. Use only for the user\'s requested task. A failed or disconnected call may already have taken effect: never automatically retry a mutation after an ambiguous failure. Disabled tools require the user to re-enable them in Settings. Core and Desktop are separate connectors.';
+  if (surface === 'plugins') return 'External MCP tools enabled by the user in MALACHI OVERDRIVE. Each tool retains its upstream schema and annotations. External servers run with their own operating-system or service permissions; MALACHI OVERDRIVE approved folders do not sandbox them. Use only for the user\'s requested task. A failed or disconnected call may already have taken effect: never automatically retry a mutation after an ambiguous failure. Disabled tools require the user to re-enable them in Settings. Core and Desktop are separate connectors. ' + backgroundPolicy;
   return surface === 'desktop' ? desktopInstructions(ctx, platform) : coreInstructions(ctx, platform);
 }
 
@@ -108,7 +110,8 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
         ]),
     'Never send read’s line-number prefixes to apply_patch; they are display metadata, not file content.',
     'apply_patch is the only way to change files: it adds, updates, moves and deletes, and it is atomic across files.',
-    'exec_command runs git, npm, builds, tests and anything else; a long-running one gives you a session_id to continue with write_stdin.',
+    'exec_command runs builds, tests and other commands; retain session_id for write_stdin.',
+    backgroundPolicy,
     ...(config.multiAgent.allowUnattributedCalls && ctx.caps.command && !ctx.readOnly
       ? ['Allow unattributed calls is enabled: self-contained commands, including a user-requested computer shutdown, may run without a ChatGPT conversation identity. Supply an explicit approved workdir; do not borrow another chat’s workspace or terminal session.']
       : []),
@@ -143,11 +146,7 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
     // This connector often runs long local tasks where silence looks like a stalled MCP.
     // Keep progress unusually visible, but do it in compact phase-level updates rather than
     // narrating every cheap read and wasting the context the connector is meant to save.
-    'Keep the user visibly informed more than usual while you work. Before a meaningful tool run,',
-    'say in one short line what you are doing. On longer work, send another short progress update',
-    'after a few meaningful calls or when the phase changes; do not stay silent until the end.',
-    'Report findings, changes, failures and plan changes immediately, and name the paths you modified.',
-    'Do not narrate every trivial call.'
+    'Keep the user visibly informed more than usual while you work. Briefly state the next meaningful action, then report phase changes, findings, failures and modified paths. Avoid narrating trivial calls.'
   );
 
   if (sessionTools) {
@@ -191,6 +190,8 @@ function desktopInstructions(ctx: ToolContext, platform: NodeJS.Platform): strin
   const paste = platform === 'darwin' ? 'command+v' : 'ctrl+v';
   const lines = [
     `Local desktop control: look at this ${host}’s screen and windows, and drive its mouse and keyboard.`,
+    backgroundPolicy,
+    'Both observe and computer require that explicit grant for the current live turn, including screenshots and clipboard reads. FOREGROUND_CONTROL_REQUIRED is a user handoff, never permission to bypass the gate. New turns, app restart and Stop require a fresh grant; app and OS permissions still apply.',
     '',
     'observe first, then computer. A bare observe() returns the foreground window, a screenshot and its',
     'controls with refs; refs beat pixel coordinates because they resolve the real control again when acted on.',

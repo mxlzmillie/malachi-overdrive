@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { flushDurable, initDurableStore, readDurable, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
 import {
   inputArgs, acknowledgeBrowserInput, cancelInput, claimBrowserInput, completeBrowserDecision, enqueueInput,
-  failBrowserInput, listInputs, offerToolInput, acknowledgeToolInput, pendingBrowserInputs, requestBrowserDecision, resetInputForTests, configureInputDelivery,
+  refuseBrowserInputIsolation, failBrowserInput, listInputs, offerToolInput, acknowledgeToolInput, pendingBrowserInputs, requestBrowserDecision, resetInputForTests, configureInputDelivery,
   authorizeBrowserHelperRetry, pausedBrowserHelpers, hasEligibleToolInput, editQueuedInput, reorderQueuedInputs, setInputAutomation, authorizeBrowserInput, sessionInputPolicy
 } from '../src/main/session/input.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
@@ -1305,4 +1305,36 @@ it('delivers a legacy finish checkpoint after an ordinary turn without restoring
   await acknowledgeBrowserInput(row.id, 'page', binding.conversationId, 'native-checkpoint');
   resetInputForTests();
   expect(await pendingBrowserInputs()).toEqual([]);
+});
+
+
+it('records an isolation refusal before any browser payload or send authorization', async () => {
+  const row = await enqueueInput(input({ sessionId: null }));
+  expect(await refuseBrowserInputIsolation(row.id, '', null)).toBe(true);
+  expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({ state: 'failed', error: expect.stringContaining('BACKGROUND_UNAVAILABLE') });
+  expect(await claimBrowserInput(row.id, 'other-document', null, true)).toBeNull();
+});
+
+it('never treats lost isolation after Send authorization as proof the send did not happen', async () => {
+  const row = await enqueueInput(input({ sessionId: null }));
+  await claimBrowserInput(row.id, 'exact-document', null, true);
+  expect(await authorizeBrowserInput(row.id, 'exact-document', null)).toBe(true);
+  expect(await refuseBrowserInputIsolation(row.id, 'exact-document', null)).toBe(false);
+  expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({ state: 'browser', owner: 'exact-document', sendAuthorizedAt: expect.any(Number) });
+});
+
+it('rejects isolation failures for another conversation or another claimed document', async () => {
+  const row = await enqueueInput(input());
+  await claimBrowserInput(row.id, 'exact-document', binding.conversationId, true);
+  expect(await refuseBrowserInputIsolation(row.id, 'other-document', binding.conversationId)).toBe(false);
+  expect(await refuseBrowserInputIsolation(row.id, 'exact-document', 'wrong-conversation')).toBe(false);
+  expect(await refuseBrowserInputIsolation(row.id, 'exact-document', binding.conversationId)).toBe(true);
+});
+
+
+it('preserves an uncertain legacy browser claim when isolation cannot be proven', async () => {
+  const row = await enqueueInput(input({ sessionId: null }));
+  await claimBrowserInput(row.id, 'legacy-document', null);
+  expect(await refuseBrowserInputIsolation(row.id, 'legacy-document', null)).toBe(false);
+  expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({ state: 'browser', owner: 'legacy-document' });
 });

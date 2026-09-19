@@ -124,6 +124,8 @@ export const CHAT_BROWSERS = ['chrome', 'edge', 'brave', 'opera-air'] as const;
 export type ChatBrowser = (typeof CHAT_BROWSERS)[number];
 
 export interface UiPrefs {
+  /** Non-blocking in-app completion messages for work observed in this app lifetime. */
+  ambientNotifications?: boolean;
   /** Maintenance may reuse existing tabs but cannot open helpers or missing chats. */
   browserOnly?: boolean;
   backgroundChats?: boolean;

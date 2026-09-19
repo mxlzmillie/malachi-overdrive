@@ -23,6 +23,13 @@ Desktop permissions off at runtime while preserving stored choices for a config 
 Windows or macOS. Existing configs keep explicit choices during upgrades; missing legacy permissions are
 not silently widened.
 
+Tasks run in the background by default. Desktop-origin sends and worker placements require the
+connected matching companion and verified isolated browser ownership; failure never falls back
+to opening or focusing the user's normal browser. Native `observe` and `computer` calls additionally
+require the local user's **Allow foreground control** action for the exact live session,
+conversation and turn. New turns and app restarts require a fresh grant; Stop revokes it. Screen,
+control and clipboard permission switches still apply after the grant.
+
 With fresh defaults, Core advertises `preview`, `read`, `view_image`, `apply_patch`, `exec_command`,
 `write_stdin`, `session`, and `agents`. Enabling file saving adds `download_artifact`.
 `find` is the search fallback for a snapshot where search is enabled and command execution is
@@ -126,8 +133,9 @@ Available while multi-agent mode is enabled. It has exactly four actions:
 - `spawn` creates worker chats from one shared context plus per-worker tasks. Used once per run:
   a run that needs a worker again reuses one it already has. Each worker takes an optional
   `model` slug: the worker's chat opens with `?model=<slug>` in its fresh-chat URL, so a prime
-  on a limited model can spawn workers on a cheaper one. Omitted means the account default;
-  a slug ChatGPT does not recognise opens with the default too. The model is fixed for the
+  can request another available model. Admission checks the account's current catalog; an
+  unavailable model or reasoning combination is refused rather than replaced by a default.
+  The model is fixed for the
   life of that conversation, including across sleep/wake reuse. Each worker also takes an
   optional `reasoning_effort`: pro, none, minimal, low, medium, high, xhigh, max or ultra,
   forwarded on the open URL independently of `model` — a level never selects or changes the
@@ -141,7 +149,8 @@ Available while multi-agent mode is enabled. It has exactly four actions:
 
 Workers sleep rather than end. A worker that has reported keeps its ChatGPT conversation and
 stays reusable; its worker slot is free while it sleeps, so the limit counts only workers that
-are actually working. Waking one needs a free slot, reopens or refocuses that worker's own chat,
+are actually working. Waking one needs a free slot and reuses that worker's exact isolated chat
+without refocusing the user's window,
 and types the prime's message into it as an ordinary user message. A worker becomes permanently
 finished only when its chat reaches the context ceiling (400,000 tokens by the app's own session
 accounting); crossing it never interrupts work in flight, it only makes the next stop the last one.
@@ -156,10 +165,14 @@ cannot be proven.
 ## Desktop tools
 
 This section exists on Windows and macOS. Linux does not advertise or execute these schemas.
+Both tools refuse model calls with `FOREGROUND_CONTROL_REQUIRED` until the user grants that exact
+live task foreground access in Ambient Work Mode. This also covers passive screenshots and
+clipboard reads. The native API gate does not turn command execution or plugins into a sandbox;
+model instructions forbid using them to evade background isolation.
 
 ### `observe`
 
-Reads desktop state without moving focus: screenshots, windows and snapshot-scoped UI-control
+After the explicit foreground grant, reads desktop state without moving focus: screenshots, windows and snapshot-scoped UI-control
 information. Window capture tries a direct background path first and labels a visible-screen
 fallback when the pixels may be occluded. Screen access is independent from mouse/keyboard
 control.
@@ -197,7 +210,8 @@ can keep observation available while disabling state-changing desktop actions.
 Older conversations can retain a cached MCP schema after an upgrade. Refresh/review the app in
 ChatGPT, or recreate it if your workspace requires that, then start a new conversation when the
 connector's exposed tool shape changes. The current extension pairs automatically with the local
-bridge; there is no pairing code to enter.
+bridge after one-time pairing with the code from **Setup → Browser**. App version 2.0.21 requires
+the matching protocol-15 companion; reload the unpacked extension after updating the app.
 
 ## Tests that protect the surface
 

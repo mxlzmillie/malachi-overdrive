@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   assertCompatibleMacOSDeploymentTargets,
   assertDeveloperIdMacCodeSignature,
+  assertMacOSReleaseNotarization,
   assertNoTrustBearingMacCodeSignature,
   withOtoolSafePath
 } from './macos-audit-utils.mjs';
@@ -160,10 +161,9 @@ if (launchedMachOCount < 6) {
   throw new Error(`Only found ${launchedMachOCount} launchable Mach-O files in ${app}; executable-mode audit is unexpectedly shallow`);
 }
 
-// The release notes promise no publisher/Developer-ID signature, and Apple-Silicon executables
-// carry ad-hoc LC_CODE_SIGNATURE commands whether or not anyone signed them, so a successful
-// `codesign --display` proves nothing about trust on its own. Inspect the displayed identity
-// semantics instead.
+// Apple-Silicon executables carry ad-hoc LC_CODE_SIGNATURE commands even in local builds,
+// so a successful `codesign --display` proves nothing about publisher trust. Require the
+// configured identity policy: coherent ad-hoc locally, the exact Developer ID for releases.
 //
 // The CodeResources envelope is now passed as a requirement rather than a prohibition. Its
 // absence is what made issue #66 — executables claiming a resource seal the bundle did not have,
@@ -182,8 +182,11 @@ if (macOSReleaseSigningRequired(process.env)) {
 // Check the copied payload too: a valid source seal does not prove that DMG/ZIP
 // construction preserved every sealed resource and nested executable.
 run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
+// This common audit also runs on the DMG and ZIP extractions, so an archive cannot lose
+// its stapled ticket while retaining a valid Developer ID resource seal.
+assertMacOSReleaseNotarization(app);
 
-const signingPolicy = macOSReleaseSigningRequired(process.env) ? 'Developer ID release identity' : 'local ad-hoc policy';
+const signingPolicy = macOSReleaseSigningRequired(process.env) ? 'Developer ID release identity and stapled notarization' : 'local ad-hoc policy';
 process.stdout.write(
   `macOS ${arch} bundle metadata/icon, ${launchedMachOCount} launchable executable modes, ${machOCount} thin Mach-O payloads, deployment floors and ${signingPolicy} verified.\n`
 );

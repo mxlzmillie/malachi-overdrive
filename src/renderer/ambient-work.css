@@ -1,0 +1,92 @@
+/* The capsule owns a reserved edge. Neither preview nor notice overlays chat controls. */
+:is(.ambient-edge, .ambient-peek, .ambient-complete, .control-rail) { --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.app.has-ambient-work { --ambient-edge-width: 58px; padding-right: var(--ambient-edge-width); position: relative; }
+.app.has-ambient-peek { grid-template-columns: min(var(--sidebar-width, var(--sidebar-default, 248px)), 50vw) minmax(0, 1fr) min(360px, 30vw); }
+.app.has-ambient-peek.is-sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr) min(360px, 36vw); }
+.ambient-edge { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); width: 48px; z-index: 12; }
+.ambient-edge .ambient-edge-main { width: 48px; min-height: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 12px 3px; border-radius: 24px; background: var(--card); border: 1px solid var(--edge); box-shadow: 0 8px 28px #0002; }
+.ambient-edge-main:hover, .ambient-edge-main[aria-expanded='true'] { border-color: var(--red); }
+.ambient-signal { width: 12px; height: 12px; border-radius: 50%; background: var(--faint); border: 3px solid var(--card); box-shadow: 0 0 0 1px var(--line); }
+.ambient-edge[data-state='working'] .ambient-signal, .ambient-edge[data-state='verifying'] .ambient-signal, .ambient-edge[data-state='packaging'] .ambient-signal { background: #fb6070; animation: ambient-breathe 2.5s ease-in-out infinite; }
+.ambient-edge:is([data-state='blocked'], [data-state='failed'], [data-state='waiting-permission']) .ambient-signal { background: #eeb15c; }
+.ambient-edge[data-state='complete'] .ambient-signal { background: #63d49b; }
+.ambient-edge-state { font: 650 9px/1.15 var(--sans); white-space: nowrap; text-align: center; }
+.ambient-edge-time, .ambient-edge-count { color: var(--soft); font: 500 10px/1.2 var(--mono); }
+.ambient-peek { grid-column: 3; grid-row: 2 / -1; display: flex; flex-direction: column; min-width: 0; min-height: 0; align-self: stretch; margin: 10px 4px 14px 0; overflow: hidden; border: 1px solid var(--edge); border-radius: 18px; background: var(--card); color: var(--ink); box-shadow: 0 14px 36px #0002; }
+:root[data-theme='dark'] .ambient-peek { background: linear-gradient(155deg, #211015 0%, #151416 160px); border-color: #48252a; }
+.ambient-peek-head { display: flex; flex-shrink: 0; align-items: start; gap: 8px; padding: 20px 16px 15px; border-bottom: 1px solid var(--line); }
+.ambient-heading { min-width: 0; flex: 1; }
+.ambient-eyebrow { font: 650 9px/1.4 var(--mono); letter-spacing: .12em; color: var(--red); }
+.ambient-heading h2 { margin: 7px 0; font: 550 19px/1.22 var(--sans); letter-spacing: -.03em; }
+.ambient-heading p { color: var(--soft); font-size: 11px; line-height: 1.5; margin: 0; }
+.ambient-peek-body { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 16px; }
+.ambient-task-label { display: grid; gap: 5px; color: var(--soft); font-size: 11px; }
+.ambient-task-select { min-width: 0; width: 100%; height: 40px; border-radius: 9px; background: var(--sunk); border: 1px solid var(--line); color: var(--ink); padding: 0 9px; font: 550 12px var(--sans); }
+.ambient-status-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
+.ambient-stage { font: 650 11px/1.5 var(--sans); color: var(--ink); }
+.ambient-elapsed { color: var(--soft); font: 500 10px/1.5 var(--mono); margin-left: auto; }
+.ambient-model { color: var(--soft); font: 500 11px/1.5 var(--mono); overflow-wrap: anywhere; margin: 8px 0 16px; }
+.ambient-latest { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; margin: 0; padding: 13px; border: 1px solid var(--line); background: var(--sunk); border-radius: 11px; }
+.ambient-progress { accent-color: var(--red); width: 100%; height: 5px; margin-top: 12px; }
+.ambient-warning { color: #d9a952; border-left: 2px solid currentColor; font-size: 12px; line-height: 1.5; padding-left: 10px; overflow-wrap: anywhere; }
+.ambient-workers, .ambient-outputs { display: grid; gap: 8px; margin-top: 14px; }
+.ambient-worker { display: grid; gap: 5px; padding-block: 9px; border-bottom: 1px solid var(--line); min-width: 0; }
+.ambient-worker strong { font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
+.ambient-worker span { font-size: 10px; line-height: 1.5; color: var(--soft); overflow-wrap: anywhere; }
+.ambient-worker .ambient-action { justify-self: start; }
+.ambient-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 18px; }
+.ambient-action { min-width: 0; min-height: 36px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunk); color: var(--ink); padding: 8px 10px; font: 500 11px/1.4 var(--sans); cursor: pointer; overflow-wrap: anywhere; }
+.ambient-action:hover:not(:disabled) { background: var(--hover); border-color: var(--edge); }
+.ambient-action:disabled { cursor: default; opacity: .55; }
+.ambient-action:focus-visible, .ambient-task-select:focus-visible { outline: 2px solid var(--red); outline-offset: 3px; }
+.ambient-close { min-width: 36px; font-size: 20px; line-height: 1; background: transparent; padding: 6px; }
+.ambient-control-status { color: var(--soft); font-size: 11px; line-height: 1.5; margin: 8px 0 0; overflow-wrap: anywhere; }
+.ambient-control-status:empty { display: none; }
+.ambient-control-note { font-size: 11px; color: var(--soft); line-height: 1.5; overflow-wrap: anywhere; margin: 14px 0 0; }
+.ambient-peek-actions { display: grid; flex-shrink: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; padding: 13px; border-top: 1px solid var(--line); }
+.ambient-peek-actions > :last-child { grid-column: 1 / -1; }
+.ambient-primary { background: var(--red-wash); border-color: var(--red-line); }
+.ambient-complete { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin: 5px 18px; border: 1px solid var(--edge); border-radius: 12px; background: var(--card); }
+.ambient-complete-copy { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.ambient-complete-copy strong { font-size: 12px; font-weight: 600; }
+.ambient-complete-copy span { color: var(--soft); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app.has-ambient-notice > main { grid-template-rows: auto minmax(0, 1fr); }
+.app.has-ambient-notice > main > .ambient-complete { grid-row: 1; }
+.app.has-ambient-notice > main > .panel.is-active { grid-row: 2; }
+.app.has-ambient-work.has-control-rail.is-sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr) var(--control-rail-width, 392px); }
+@keyframes ambient-breathe { 50% { box-shadow: 0 0 0 4px #fb607020; } }
+@media (max-width: 1050px) {
+  .app.has-ambient-work { --ambient-edge-width: 54px; }
+  .app.has-ambient-work:is(.has-ambient-peek, .has-control-rail) { grid-template-columns: min(var(--sidebar-width, var(--sidebar-default, 248px)), 50vw) minmax(0, 1fr); grid-template-rows: auto auto auto minmax(0, 38vh) minmax(0, 1fr); }
+  .app.has-ambient-work.is-sidebar-collapsed:is(.has-ambient-peek, .has-control-rail) { grid-template-columns: 0 minmax(0, 1fr); }
+  .app.has-ambient-work:is(.has-ambient-peek, .has-control-rail) > main { grid-row: 5; }
+  .ambient-peek, .app.has-ambient-work .control-rail { position: relative; inset: auto; grid-column: 2; grid-row: 4; width: auto; max-width: 100%; min-height: 0; margin: 4px 10px 8px; border: 1px solid var(--edge); border-radius: 13px; }
+  .ambient-peek-head { padding: 10px; }
+  .ambient-heading h2 { font-size: 15px; margin: 3px 0; }
+  .ambient-heading p { display: none; }
+  .ambient-peek-body { padding: 10px; }
+  .ambient-peek-actions { padding: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ambient-peek-actions > :last-child { grid-column: auto; }
+  .ambient-action { min-height: 44px; }
+  .ambient-complete { margin-inline: 10px; padding: 8px; gap: 6px; }
+  .app.has-ambient-work .composer { width: calc(100% - 20px); }
+  .ambient-edge-main { min-height: 120px; }
+}
+@media (max-width: 520px) {
+  .app.has-ambient-work > header { padding-inline: 10px; }
+  .app.has-ambient-work > header .live em { display: none; }
+  .ambient-peek-actions { gap: 4px; }
+  .ambient-peek-actions .ambient-action { padding: 6px; font-size: 10px; }
+  .app.has-ambient-work .composer { grid-template-columns: 32px 0 54px minmax(0, 1fr) 36px; column-gap: 4px; }
+  .app.has-ambient-work .model-menu { width: 100%; min-width: 0; }
+  .app.has-ambient-work .model-menu > summary { padding-inline: 3px; }
+}
+@media (pointer: coarse) {
+  .ambient-action { min-height: 44px; }
+  .ambient-close { min-width: 44px; }
+  .ambient-edge .ambient-edge-main { width: 48px; min-height: 120px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ambient-edge .ambient-signal { animation: none !important; }
+  .ambient-peek, .ambient-action { transition: none; scroll-behavior: auto; }
+}

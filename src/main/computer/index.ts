@@ -14,6 +14,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,6 +24,14 @@ import { findWindowsPowerShell, terminateProcessTree } from '../exec.js';
 import { logInfo, logWarn } from '../logger.js';
 import type { MacOSDesktopAccessStatus, MacOSPermissionState } from '../../shared/types.js';
 import { HELPER_SCRIPT } from './helper.js';
+
+// Carries the caller's existing permission recheck through both serialization queues.
+// It is no grant of its own: every check reads the exact current task authority.
+const desktopAuthorization = new AsyncLocalStorage<() => Promise<void>>();
+export function withDesktopAuthorization<T>(authorize: (() => Promise<void>) | undefined, work: () => Promise<T>): Promise<T> {
+  return authorize ? desktopAuthorization.run(authorize, work) : work();
+}
+async function authorizeDesktop(): Promise<void> { await desktopAuthorization.getStore()?.(); }
 
 /** Width the screenshot is scaled down to, matching computer-use convention. */
 export const DEFAULT_SCREENSHOT_WIDTH = 1280;
@@ -656,6 +665,7 @@ async function startMacOSAddon(): Promise<MacOSAddonRuntime> {
 
 async function sendMacOSAddonRequest(request: Record<string, unknown>, expected?: ExpectedHelper): Promise<Record<string, any>> {
   const runtime = await startMacOSAddon();
+  await authorizeDesktop();
   assertHelperGeneration(runtime.generation, expected);
   if (runtime.pending) throw new ComputerError('macOS Desktop addon received overlapping requests.');
   return new Promise<Record<string, any>>((resolve, reject) => {
@@ -725,6 +735,7 @@ export async function stopComputerHelper(): Promise<void> {
 async function sendHelperRequest(request: Record<string, unknown>, expected?: ExpectedHelper): Promise<Record<string, any>> {
   if (useMacOSDesktopAddon()) return sendMacOSAddonRequest(request, expected);
   const runtime = await startHelper();
+  await authorizeDesktop();
   assertHelperGeneration(runtime.generation, expected);
   if (runtime.pending) throw new ComputerError('Desktop helper received overlapping requests.');
 
@@ -754,6 +765,7 @@ function runHelper(request: Record<string, unknown>, expected?: ExpectedHelper):
   const result = helperQueue.then(async () => {
     const startedAt = Date.now();
     try {
+      await authorizeDesktop();
       return await sendHelperRequest(request, expected);
     } finally {
       logInfo(
@@ -1310,6 +1322,8 @@ export async function act(
 export async function actAndCapture(
   actions: Action[],
   opts: {
+    /** Rechecked after queue waits, before each action and before native publication. */
+    authorize?: () => Promise<void>;
     frameId?: number;
     capture?: {
       window?: number;
@@ -1322,7 +1336,8 @@ export async function actAndCapture(
     verify?: VerificationSpec;
   } = {}
 ): Promise<ActionResult & { screenshot: Screenshot | null; verification: VerificationResult | null }> {
-  return exclusive(async () => {
+  return withDesktopAuthorization(opts.authorize, () => exclusive(async () => {
+    await authorizeDesktop();
     const before = opts.frameId === undefined ? qualifiedFrame(lastFrame) : frameById(opts.frameId);
     // capture.crop is expressed in pixels of the screenshot the caller saw, exactly like a
     // coordinate action. Another chat/agent can replace the app-global lastFrame between that
@@ -1344,6 +1359,7 @@ export async function actAndCapture(
     let verification: VerificationResult | null = null;
     if (opts.verify) {
       try {
+        await authorizeDesktop();
         verification = await verifyDesktopLocked(opts.verify);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1354,6 +1370,8 @@ export async function actAndCapture(
       }
     }
     if (!opts.capture) return { ...result, screenshot: null, verification };
+
+    await authorizeDesktop();
 
     const { preferActiveWindow, ...capture } = opts.capture;
     // Resolved here rather than by the caller: the actions may have changed which window
@@ -1366,7 +1384,7 @@ export async function actAndCapture(
       screenshot: await screenshotLocked(capture, before),
       verification
     };
-  });
+  }));
 }
 
 async function verifyDesktopLocked(spec: VerificationSpec): Promise<VerificationResult> {
@@ -1658,6 +1676,8 @@ async function actLocked(
     }
   };
   for (const [index, action] of actions.entries()) {
+    try { await authorizeDesktop(); }
+    catch (error) { throw localActionFailure(error, completedCount, index); }
     if (action.type === 'wait') {
       await flush();
       const ms = Math.min(10_000, Math.max(0, action.ms ?? 2000));
@@ -1669,7 +1689,9 @@ async function actLocked(
     if (action.type === 'read_clipboard') {
       await flush();
       try {
-        clipboard.push((await electronClipboard()).readText());
+        const clipboardApi = await electronClipboard();
+        await authorizeDesktop();
+        clipboard.push(clipboardApi.readText());
       } catch (err) {
         throw localActionFailure(err, completedCount, index);
       }
@@ -1680,7 +1702,9 @@ async function actLocked(
     if (action.type === 'write_clipboard') {
       await flush();
       try {
-        (await electronClipboard()).writeText(action.text);
+        const clipboardApi = await electronClipboard();
+        await authorizeDesktop();
+        clipboardApi.writeText(action.text);
       } catch (err) {
         throw localActionFailure(err, completedCount, index);
       }
@@ -1690,6 +1714,9 @@ async function actLocked(
     }
     batch.push(mapOne(action));
     batchIndices.push(index);
+    // A user-revocable handoff must be checked between native actions too. Commands
+    // already accepted by the OS cannot be undone, but the next one must not start.
+    if (desktopAuthorization.getStore()) await flush();
   }
   // A pure clipboard/wait batch must not depend on a native accessibility helper at all. This is
   // what makes the connector genuinely useful when the user granted only clipboard access or

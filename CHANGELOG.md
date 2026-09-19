@@ -11,6 +11,17 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.21] — 2026-09-19
+
+- Hardened Ambient Work Mode around exact task ownership, truthful activity and explicit recovery.
+- Kept background worker isolation independent of ordinary chat-opening preferences and preserved
+  explicit model and reasoning requirements.
+- Expanded the compact activity preview and retained the full Control Rail as an explicit action.
+- Replaced the Windows UI Automation smoke test's uncontrolled foreground target with an owned
+  window and known control; production helper timeouts remain unchanged.
+
+See [the full release notes](docs/release-notes/v2.0.21.md).
+
 ## [2.0.20] — 2026-09-19
 
 - Added Ambient Edge, a compact right-edge live-work surface that shows genuine task, worker,

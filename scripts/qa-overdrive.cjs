@@ -23,6 +23,7 @@ const { app, BrowserWindow, ipcMain, session } = require('electron');
 fs.mkdirSync(output, { recursive: true });
 app.setPath('userData', path.join(output, 'isolated-profile'));
 app.commandLine.appendSwitch('disable-background-networking');
+app.commandLine.appendSwitch('force-prefers-reduced-motion');
 const checks = [], errors = [], forbiddenActions = [], externalRequests = [];
 const now = Date.now();
 const projects = [
@@ -97,6 +98,15 @@ const empty = [];
 const queuedInputs = [];
 const replies = {
   'state:get': () => state, 'window:getZoom': () => 1, 'log:get': () => empty,
+  'ambient:get': () => ({ revision: 1, notificationsEnabled: true, completions: [], tasks: [{
+    id: recordings[0].id, sessionId: recordings[0].id, conversationId: recordings[0].conversationId, turnId: 'qa-turn',
+    title: 'Verify the Ambient Work Mode release', state: 'working', stage: 'Working', startedAt: now - 124000, updatedAt: now, live: true, completionId: null, progress: null,
+    model: { model: 'gpt-6-pro', reasoningEffort: 'pro', evidence: 'confirmed' },
+    workers: [{ id: 'worker-1', runId: 'qa-run', sessionId: recordings[3].id, conversationId: recordings[3].conversationId, name: 'Renderer verifier', task: 'Check responsive layouts', state: 'active', active: true, model: { model: 'gpt-6-pro', reasoningEffort: 'pro', evidence: 'confirmed' } }],
+    activity: [{ id: 'qa-event', taskId: recordings[0].id, workerId: 'worker-1', timestamp: now, stage: 'working', description: 'Checked composer visibility at desktop and narrow widths', model: { model: 'gpt-6-pro', reasoningEffort: 'pro', evidence: 'confirmed' }, count: 1 }],
+    outputs: [{ id: 'qa-output', sessionId: recordings[0].id, eventSeq: 2, outputIndex: 0, name: 'control-rail-report.pdf', kind: 'file', createdAt: now - 20000 }],
+    warning: null, controls: [{ action: 'pause', label: 'Pause follow-ups', enabled: true }, { action: 'stop', label: 'Stop safely', enabled: true }]
+  }] }),
   'sessions:list': () => ({ sessions: recordings, activeId: recordings[0].id, blocked: [], pressure: [], total: 19, nextCursor: null }),
   'projects:list': () => projects, 'sessions:outbox': () => queuedInputs, 'sessions:pausedHelpers': () => empty,
   'sessions:events': payload => { const events = sessionEvents[payload.id] ?? []; return { summary: recordings.find(row => row.id === payload.id) ?? null, events, total: events.length, nextFrom: (events.at(-1)?.seq ?? 0) + 1 }; },
@@ -166,7 +176,7 @@ async function captureControlRail(name, width, height, theme = 'dark') {
   await new Promise(resolve => setTimeout(resolve, 180));
   const geometry = await evaluate(() => {
     const rail = document.getElementById('controlRail'), box = rail.getBoundingClientRect();
-    const scroller = rail.querySelector('.control-rail-scroll');
+    const scroller = rail.querySelector('.control-rail-deck');
     const quick = rail.querySelector('.control-rail-quick').getBoundingClientRect();
     const quickButtons = [...rail.querySelectorAll('.control-rail-quick button')].map(button => button.getBoundingClientRect());
     const composer = document.getElementById('composer').getBoundingClientRect();
@@ -184,7 +194,7 @@ async function captureControlRail(name, width, height, theme = 'dark') {
   check(geometry.independentScroll, `${name}: Control Rail has independent vertical scrolling`);
   check(geometry.quickVisible, `${name}: quick actions are fully visible`);
   if (width > 1050) check(geometry.railWidth >= 360 && geometry.railWidth <= 460 && geometry.composerVisible, `${name}: desktop rail width is bounded and composer remains visible`);
-  else check(Math.abs(geometry.railWidth - width) <= 1, `${name}: narrow rail becomes a full-width drawer`);
+  else check(geometry.railWidth > 200 && geometry.composerVisible, `${name}: narrow workbench reserves space above the composer`);
   fs.writeFileSync(path.join(output, `${name}.png`), (await win.webContents.capturePage()).resize({ width }).toPNG());
 }
 
@@ -192,6 +202,7 @@ async function captureAmbientEdge(name, width, height, theme = 'dark') {
   win.setContentSize(width, height);
   await evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
   await evaluate(() => {
+    document.querySelector('.toast')?.remove(); // Retire the earlier task-brief fixture notification.
     const rail = document.getElementById('controlRail');
     if (!rail.hidden) document.getElementById('controlRailToggle').click();
     const edge = document.querySelector('.ambient-edge-main');
@@ -203,27 +214,37 @@ async function captureAmbientEdge(name, width, height, theme = 'dark') {
     const peek = document.querySelector('.ambient-peek').getBoundingClientRect();
     const edge = document.querySelector('.ambient-edge').getBoundingClientRect();
     const composer = document.getElementById('composer').getBoundingClientRect();
+    const options = document.querySelector('.composer-options').getBoundingClientRect();
+    const model = document.getElementById('modelMenu').getBoundingClientRect();
     return {
       width: innerWidth, height: innerHeight,
       peek: { left: peek.left, top: peek.top, right: peek.right, bottom: peek.bottom },
       edge: { left: edge.left, top: edge.top, right: edge.right, bottom: edge.bottom },
+      capsuleFits: document.querySelector('.ambient-edge-state').getBoundingClientRect().width <= edge.width,
+      toolbarClear: options.right <= model.left + 1,
+      reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches && getComputedStyle(document.querySelector('.ambient-signal')).animationName === 'none',
       composerVisible: composer.left >= -1 && composer.right <= innerWidth + 1 && composer.bottom <= innerHeight + 1,
       railHidden: document.getElementById('controlRail').hidden,
-      scrimHidden: document.querySelector('.control-rail-scrim').hidden,
+      scrimHidden: !document.querySelector('.control-rail-scrim'),
+      noOverlap: peek.right <= composer.left || peek.left >= composer.right || peek.bottom <= composer.top || peek.top >= composer.bottom,
+      previewOverflow: document.querySelector('.ambient-peek').scrollWidth - document.querySelector('.ambient-peek').clientWidth,
       bodyOverflow: document.documentElement.scrollWidth - innerWidth
     };
   });
   check(geometry.peek.left >= -1 && geometry.peek.top >= -1 && geometry.peek.right <= geometry.width + 1 && geometry.peek.bottom <= geometry.height + 1, `${name}: Ambient preview fits viewport`);
   check(geometry.edge.left >= -1 && geometry.edge.top >= -1 && geometry.edge.right <= geometry.width + 1 && geometry.edge.bottom <= geometry.height + 1, `${name}: Ambient capsule fits viewport`);
-  check(geometry.railHidden && geometry.scrimHidden && geometry.composerVisible && geometry.bodyOverflow <= 1, `${name}: compact preview leaves the work page usable without a modal scrim`);
+  check(geometry.capsuleFits && geometry.reducedMotion && geometry.toolbarClear, `${name}: capsule label fits, toolbar controls remain separate, and reduced motion is respected`);
+  check(geometry.railHidden && geometry.scrimHidden && geometry.composerVisible && geometry.noOverlap && geometry.previewOverflow <= 1 && geometry.bodyOverflow <= 1, `${name}: compact preview leaves the work page usable without a modal scrim`);
   fs.writeFileSync(path.join(output, `${name}.png`), (await win.webContents.capturePage()).resize({ width }).toPNG());
-  await evaluate(() => document.querySelector('.ambient-peek-close').click());
+  await evaluate(() => document.querySelector('[aria-label="Close background preview"]').click());
 }
 
 const deadline = setTimeout(() => { console.error('QA deadline reached'); app.exit(1); }, 100000);
 app.whenReady().then(async () => {
+  // The fixture profile is isolated, and each run starts with deterministic renderer preferences.
+  await session.defaultSession.clearStorageData({ storages: ['localstorage'] });
   session.defaultSession.webRequest.onBeforeRequest((details, done) => {
-    const external = /^https?:/.test(details.url);
+    const external = /^(?:https?|wss?):/i.test(details.url);
     if (external) externalRequests.push(details.url);
     done({ cancel: external });
   });
@@ -234,7 +255,7 @@ app.whenReady().then(async () => {
   });
   await win.loadFile(path.join(root, 'out/renderer/index.html'));
   // Geometry captures verify settled layouts, not the sidebar's transition frames.
-  await win.webContents.insertCSS('*, *::before, *::after { transition: none !important; animation: none !important; }');
+  await win.webContents.insertCSS('*, *::before, *::after { transition: none !important; }');
   await waitFor(() => document.querySelector('[data-project-id="qa-overdrive"]'), 'project catalog rendered');
   check(await evaluate(() => document.querySelectorAll('.workbench-project').length === 3), 'workbench shows the three real fixture projects');
   await captureWorkbench('workbench-desktop-dark', 1440, 1000);
@@ -319,7 +340,33 @@ app.whenReady().then(async () => {
     window.__qaRailBefore = { draft: input.value, scroll: body.scrollTop };
   });
   await captureAmbientEdge('ambient-edge-desktop-dark', 1440, 900);
+  await evaluate(() => document.getElementById('sidebarToggle').click());
+  await captureAmbientEdge('ambient-edge-desktop-sidebar', 1440, 900);
+  await evaluate(() => document.getElementById('sidebarToggle').click());
   await captureAmbientEdge('ambient-edge-mobile-390', 390, 844);
+  await captureAmbientEdge('ambient-edge-mobile-320', 320, 700);
+  await evaluate(() => document.getElementById('chatInput').focus());
+  const completed = replies['ambient:get']();
+  completed.revision = 2;
+  completed.tasks[0] = { ...completed.tasks[0], state: 'complete', stage: 'Complete', live: false, completionId: 'qa-completed' };
+  completed.completions = [{ id: 'qa-completed', taskId: recordings[0].id, summary: 'Ambient renderer checks completed.', output: completed.tasks[0].outputs[0] }];
+  win.webContents.send('ambient:changed', completed);
+  await waitFor(() => !document.querySelector('.ambient-complete').hidden, 'real event-driven completion preview rendered');
+  for (const [width, height] of [[320, 700], [1440, 900]]) {
+    win.setContentSize(width, height);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    check(await evaluate(() => {
+      const notice = document.querySelector('.ambient-complete').getBoundingClientRect();
+      const composer = document.getElementById('composer').getBoundingClientRect();
+      return notice.bottom <= composer.top && notice.left >= 0 && notice.right <= innerWidth && composer.bottom <= innerHeight &&
+        document.activeElement === document.getElementById('chatInput');
+    }), `Ambient completion at ${width}px leaves composer clear and retains typing focus`);
+    fs.writeFileSync(path.join(output, `ambient-complete-${width}.png`), (await win.webContents.capturePage()).toPNG());
+  }
+  await evaluate(() => document.querySelector('[aria-label="Dismiss completion"]').click());
+  win.webContents.send('ambient:changed', { ...completed, revision: 3 });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  check(await evaluate(() => document.querySelector('.ambient-complete').hidden), 'duplicate completion is not announced twice');
   win.setContentSize(1440, 900);
   await captureControlRail('control-rail-desktop-dark', 1440, 900);
   check(await evaluate(() => {

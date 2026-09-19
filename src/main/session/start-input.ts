@@ -1,13 +1,11 @@
 /** Explicit desktop sends bring up the existing connection/browser authorities. */
 import { connect, getStatus, onStatusChange } from '../connection.js';
-import { startBridge } from '../bridge.js';
-import { wakeBrowserUrl, resetBrowserStartupForTests } from '../browser-startup.js';
-import { getConfig } from '../config.js';
+import { browserWakeConnected, startBridge } from '../bridge.js';
+import { wakeBrowserWork } from '../browser-wake.js';
 import { assertSessionInputAvailable, enqueueInput, cancelInput, listInputs, noteInputStartupError, type InputArgs, type InputEntry } from './input.js';
 
-function wakeBrowser(entry: InputEntry, retry = false): Promise<void> {
-  const marker = `cos-input=${encodeURIComponent(entry.id)}`;
-  return wakeBrowserUrl(entry.conversationId ? `https://chatgpt.com/c/${encodeURIComponent(entry.conversationId)}` : `https://chatgpt.com/?${marker}#${marker}`, retry, getConfig().ui.backgroundChats === true);
+function requireBackgroundBrowser(): void {
+  if (!browserWakeConnected()) throw new Error('BACKGROUND_UNAVAILABLE: Connect the browser extension before starting background work. No foreground browser will be opened.');
 }
 async function ready(signal?: AbortSignal): Promise<void> {
   await connect();
@@ -30,10 +28,13 @@ async function ready(signal?: AbortSignal): Promise<void> {
     unsubscribe = onStatusChange(inspect); inspect();
   });
   if (!await startBridge()) throw new Error('The browser bridge could not start. Your message has not been queued.');
+  requireBackgroundBrowser();
 }
-async function deliver(entry: InputEntry, retry = false): Promise<InputEntry> {
+async function deliver(entry: InputEntry): Promise<InputEntry> {
   try {
-    await wakeBrowser(entry, retry);
+    // Only the companion can prove/create isolated placement. An OS URL launch would
+    // activate a personal browser window before isolation could be checked.
+    requireBackgroundBrowser(); wakeBrowserWork();
     return await noteInputStartupError(entry.id, null) ?? entry;
   } catch (error) {
     return await noteInputStartupError(entry.id, `Message queued. Browser startup failed: ${(error as Error).message}`) ?? entry;
@@ -62,11 +63,13 @@ export async function sendDesktopInput(input: InputArgs): Promise<InputEntry> {
     return deliver(entry);
   } finally { if (starting.get(input.id) === controller) starting.delete(input.id); }
 }
-export async function retryQueuedInputBrowser(id: string): Promise<InputEntry | null> {
-  const eligible = (entry: InputEntry | undefined): entry is InputEntry => !!entry && entry.state === 'queued' && entry.purpose !== 'decision' && !!entry.error?.startsWith('Message queued. Browser startup failed:');
+export async function retryQueuedInputBrowser(id: string, expected?: { sessionId: string; conversationId: string }): Promise<InputEntry | null> {
+  const eligible = (entry: InputEntry | undefined): entry is InputEntry => !!entry &&
+    (!expected || (entry.sessionId === expected.sessionId && entry.conversationId === expected.conversationId)) &&
+    entry.state === 'queued' && entry.purpose !== 'decision' && !!entry.error?.startsWith('Message queued. Browser startup failed:');
   if (!eligible((await listInputs()).find(entry => entry.id === id))) return null;
   await ready();
   const entry = (await listInputs()).find(row => row.id === id);
-  return eligible(entry) ? deliver(entry, true) : null;
+  return eligible(entry) ? deliver(entry) : null;
 }
-export function resetInputStartupForTests(): void { resetBrowserStartupForTests(); starting.clear(); }
+export function resetInputStartupForTests(): void { starting.clear(); }

@@ -16,7 +16,7 @@ vi.mock('electron', () => ({
   }
 }));
 
-import { act } from '../src/main/computer/index.js';
+import { act, actAndCapture, listWindows, withDesktopAuthorization } from '../src/main/computer/index.js';
 
 describe('desktop local-only action path', () => {
   beforeEach(() => {
@@ -47,6 +47,36 @@ describe('desktop local-only action path', () => {
     ).rejects.toThrow(/UNKNOWN_UI_REF|STALE_REF/);
 
     expect(mocks.writeText).not.toHaveBeenCalled();
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it('rechecks revoked foreground custody after an earlier operation releases the exclusive queue', async () => {
+    let enter!: () => void; const entered = new Promise<void>(resolve => { enter = resolve; });
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    const holding = actAndCapture([{ type: 'wait', ms: 0 }], { authorize: async () => { if (first) { first = false; enter(); await gate; } } });
+    await entered;
+    let allowed = true;
+    const queued = actAndCapture([{ type: 'write_clipboard', text: 'must-not-land' }], {
+      authorize: async () => { if (!allowed) throw new Error('FOREGROUND_CONTROL_REQUIRED'); }
+    });
+    const rejected = expect(queued).rejects.toThrow('FOREGROUND_CONTROL_REQUIRED');
+    allowed = false; release(); await holding; await rejected;
+    expect(mocks.writeText).not.toHaveBeenCalled(); expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it('does not run the next action after a handoff is revoked midway through a local batch', async () => {
+    let allowed = true;
+    mocks.writeText.mockImplementationOnce(() => { allowed = false; });
+    await expect(actAndCapture([{ type: 'write_clipboard', text: 'accepted' }, { type: 'write_clipboard', text: 'revoked' }], {
+      authorize: async () => { if (!allowed) throw new Error('FOREGROUND_CONTROL_REQUIRED'); }
+    })).rejects.toThrow(/completed_count=1.*FOREGROUND_CONTROL_REQUIRED/);
+    expect(mocks.writeText).toHaveBeenCalledTimes(1); expect(mocks.writeText).toHaveBeenCalledWith('accepted');
+  });
+
+  it('refuses an unauthorized observation before starting a native helper', async () => {
+    await expect(withDesktopAuthorization(async () => { throw new Error('FOREGROUND_CONTROL_REQUIRED'); }, () => listWindows()))
+      .rejects.toThrow('FOREGROUND_CONTROL_REQUIRED');
     expect(mocks.spawn).not.toHaveBeenCalled();
   });
 });

@@ -20,6 +20,7 @@ const { RIPGREP, TUNNEL_CLIENT } = packagingVersions;
 const {
   assertCompatibleMacOSDeploymentTargets,
   assertDeveloperIdMacCodeSignature,
+  assertMacOSReleaseNotarization,
   assertNoTrustBearingMacCodeSignature,
   macOSDeploymentTargetsFromOtool,
   withOtoolSafePath
@@ -48,6 +49,30 @@ function yamlFile(relative: string): any {
 }
 
 describe('cross-platform packaging targets', () => {
+  it('requires an Apple notarization ticket only for public macOS releases', () => {
+    const calls: unknown[][] = [];
+    const inspect = (...args: unknown[]) => {
+      calls.push(args);
+      return { status: 0, stdout: 'The validate action worked!', stderr: '' };
+    };
+    expect(assertMacOSReleaseNotarization('local.app', { env: {}, inspect })).toBe(false);
+    expect(calls).toEqual([]);
+    expect(assertMacOSReleaseNotarization('archived release.app', {
+      env: { COS_REQUIRE_MACOS_SIGNING: '1' }, inspect
+    })).toBe(true);
+    expect(calls).toEqual([['xcrun', ['stapler', 'validate', 'archived release.app'], {
+      encoding: 'utf8', timeout: 60_000
+    }]]);
+    for (const result of [
+      { status: 65, stdout: '', stderr: 'ticket not found' },
+      { status: null, error: new Error('stapler unavailable') }
+    ]) {
+      expect(() => assertMacOSReleaseNotarization('signed but unnotarized.app', {
+        env: { COS_REQUIRE_MACOS_SIGNING: '1' }, inspect: () => result
+      })).toThrow(/no valid stapled Apple notarization ticket/);
+    }
+  });
+
   it('normalizes supported OS spellings and rejects unsupported targets', () => {
     expect(normalizePlatform('windows')).toBe('win32');
     expect(normalizePlatform('macos')).toBe('darwin');
@@ -198,6 +223,7 @@ describe('cross-platform packaging targets', () => {
       }
     ]);
     expect(parsed.jobs.package['runs-on']).toBe('${{ matrix.runner }}');
+    expect(parsed.jobs.assemble.needs).toEqual(['package', 'sources']);
     expect(workflow).toContain('name: chat-on-steroids-candidate-${{ github.run_id }}');
     expect(workflow).toContain('Install generated DEB on target distro');
     expect(workflow).toContain('Launch installed DEB normally under Xvfb');
@@ -478,6 +504,7 @@ describe('cross-platform packaging targets', () => {
       "run('codesign', ['--display', '--verbose=4', app]",
       "run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', app])",
       'assertDeveloperIdMacCodeSignature(',
+      'assertMacOSReleaseNotarization(app)',
       'assertNoTrustBearingMacCodeSignature(',
       "path.join(contents, '_CodeSignature', 'CodeResources')"
     ]) expect(macSmoke).toContain(marker);
@@ -738,6 +765,7 @@ Load command 11
       'MALACHI-OVERDRIVE-Linux-arm64.AppImage',
       'MALACHI-OVERDRIVE-Linux-arm64.deb',
       'MALACHI-OVERDRIVE-Extension.zip',
+      'MALACHI-OVERDRIVE-Native-Sources.tar.gz',
       'SHA256SUMS.txt'
     ];
     const checksumStep = release.slice(

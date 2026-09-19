@@ -227,8 +227,8 @@ describe('the Project surviving a restart', () => {
  * real service worker and reading the tab it creates, because the whole failure was that a URL
  * built correctly everywhere else was still built at the root here.
  */
-describe('the chat the extension creates beside its source', () => {
-  type Created = { id: number; url?: string; pendingUrl?: string; windowId?: number; index?: number };
+describe('the isolated successor chat the extension creates', () => {
+  type Created = { id: number; url?: string; pendingUrl?: string; windowId?: number; index?: number; active?: boolean };
   interface Probe {
     placeSuccessorChat(raw: unknown, tabId: number | null): Promise<void>;
     projectFromUrl(value: unknown): string | null;
@@ -246,16 +246,17 @@ describe('the chat the extension creates beside its source', () => {
     });
     const makeTab = async (options: Created) => {
       const tab = { ...options, id: 100 + created.length };
-      created.push(tab);
+      created.push(tab); tabs.push(tab);
       return tab;
     };
+    const windowCreate = vi.fn(async ({ url }: { url: string }) => ({ id: 80, state: 'minimized', focused: false, tabs: [await makeTab({ url, windowId: 80, active: false } as Created)] }));
     const context = vm.createContext({
       chrome: {
         storage: { local: store({ port: 8765, token: 'test-pairing' }), session: store({}) },
         windows: {
           get: async (id: number) => ({ id }),
           // The minimized window a background worker chat is created in, with its first tab.
-          create: async ({ url }: { url: string }) => ({ id: 80, tabs: [await makeTab({ url, windowId: 80 } as Created)] }),
+          create: windowCreate,
           update: () => {}
         },
         tabs: {
@@ -281,7 +282,7 @@ describe('the chat the extension creates beside its source', () => {
     });
     vm.runInContext(`${workerSource}
 globalThis.probe = { placeSuccessorChat, projectFromUrl, successorChatBase };`, context);
-    return { api: (context as unknown as { probe: Probe }).probe, created };
+    return { api: (context as unknown as { probe: Probe }).probe, created, windowCreate };
   }
 
   const chatInProject = `https://chatgpt.com/g/${NAMED_SLUG}/c/${CHAT_IN_PROJECT}`;
@@ -293,9 +294,10 @@ globalThis.probe = { placeSuccessorChat, projectFromUrl, successorChatBase };`, 
     expect(h.created).toHaveLength(1);
     expect(h.created[0]!.url!.startsWith(`https://chatgpt.com/g/${PROJECT}/project?`)).toBe(true);
     expect(h.created[0]!.url).toContain('clf=cmd-9');
-    // Still beside the chat it continues, and still in that chat's own window.
-    expect(h.created[0]!.windowId).toBe(3);
-    expect(h.created[0]!.index).toBe(2);
+    expect(h.created[0]!.windowId).toBe(80);
+    expect(h.created[0]!.index).toBeUndefined();
+    expect(h.created[0]!.active).toBe(false);
+    expect(h.windowCreate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ state: 'minimized', focused: false }));
   });
 
   it('does not inherit a Project from the visible tab when the command names none', async () => {

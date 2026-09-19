@@ -26,12 +26,15 @@ import {
   listWindows,
   screenshot,
   waitForWindow,
+  withDesktopAuthorization,
   type Action,
   type VerificationSpec
 } from '../computer/index.js';
 import { browserTabChord, isBrowserProcess } from '../computer/browser-chords.js';
 import { logInfo } from '../logger.js';
-import { noteCount, noteDetail } from './call-context.js';
+import { currentCall, noteCount, noteDetail } from './call-context.js';
+import { getSession } from '../session/store.js';
+import { foregroundCallGranted } from '../desktop-custody.js';
 import {
   cropArg,
   fail,
@@ -46,6 +49,23 @@ import {
 } from './kernel.js';
 
 const DEFAULT_WINDOW_RESULTS = 60;
+
+/** A browser worker has no ownership of the user's physical screen, focus or clipboard. */
+export async function backgroundDesktopRefusal(): Promise<string | null> {
+  const call = currentCall();
+  if (!call) return null;
+  const { conversationId, sessionId } = call.caller;
+  const session = sessionId ? await getSession(sessionId) : null;
+  if (conversationId && sessionId && session?.conversationId === conversationId && session.activeTurnId &&
+      foregroundCallGranted(sessionId, conversationId, session.activeTurnId, call.startedAt)) return null;
+  return 'FOREGROUND_CONTROL_REQUIRED: Background work cannot observe or control the physical desktop, keyboard, mouse or clipboard. ' +
+    'Use the isolated browser workspace, or ask the user to choose Allow foreground control for this exact live task in Ambient Work Mode. ' +
+    'The grant is limited to the current turn and does not bypass macOS or app permissions.';
+}
+async function assertForegroundControl(): Promise<void> {
+  const refusal = await backgroundDesktopRefusal();
+  if (refusal) throw new ComputerError(refusal);
+}
 
 /**
  * Refuses a keyboard chord that would manage a browser's tabs or windows.
@@ -238,7 +258,8 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
       },
       async (input) =>
-        reg.guarded('screen', 'observe', async () => {
+        reg.guarded('screen', 'observe', async () => withDesktopAuthorization(assertForegroundControl, async () => {
+          const refusal = await backgroundDesktopRefusal(); if (refusal) return fail(refusal);
           // wait_for happens first and then answers the ordinary question about whatever it
           // found, so "wait for the installer, then look at it" is one call rather than a
           // wait followed by a second call that races the window closing again.
@@ -372,7 +393,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           const text = prefix(waited, lines.join('\n'));
           if (!state.screenshot) return ok(text);
           return desktopImageResult(text, state.screenshot.data);
-        })
+        }))
     );
   }
 
@@ -459,6 +480,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
       },
       async ({ actions, frameId, verify, captureAfter, captureWindow, captureFull, captureMaxWidth, captureCrop }) =>
         guard('computer', async () => {
+          const refusal = await backgroundDesktopRefusal(); if (refusal) return fail(refusal);
           // Not reg.guarded: this tool covers two permissions. Pointer and keyboard steps
           // need "control", the clipboard steps need their own, and one blanket refusal
           // would hide which of them the user actually has to switch on.
@@ -544,6 +566,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           // One lock, one operation: the picture that verifies these actions must be taken
           // before anyone else can touch the desktop.
           const result = await actAndCapture(parsed, {
+            authorize: assertForegroundControl,
             frameId,
             verify: parsedVerify,
             capture:

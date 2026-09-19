@@ -1,4 +1,5 @@
 import type { ChatModelCatalog } from '../shared/chat-models.js';
+import type { AmbientControlRequest, AmbientSnapshot } from '../shared/ambient-work.js';
 import type { TaskProgress } from '../shared/task-progress.js';
 import type { BrowserPreferences } from '../shared/browser-preferences.js';
 import type { SessionControlsView } from '../main/bridge.js';
@@ -74,6 +75,14 @@ export interface SessionDetail {
 }
 
 const api = {
+  getAmbientWork: () => call<AmbientSnapshot>('ambient:get'),
+  controlAmbientWork: (request: AmbientControlRequest) => call<AmbientSnapshot>('ambient:control', request),
+  openAmbientOutput: (output: { sessionId: string; eventSeq: number; outputIndex: number }) => call<boolean>('ambient:openOutput', output),
+  onAmbientWorkChanged: (listener: (snapshot: AmbientSnapshot) => void): (() => void) => {
+    const wrapped = (_event: unknown, snapshot: AmbientSnapshot): void => listener(snapshot);
+    ipcRenderer.on('ambient:changed', wrapped);
+    return () => ipcRenderer.removeListener('ambient:changed', wrapped);
+  },
   openLegalNotices: () => call<void>('plugins:legalNotices'),
   pluginsSnapshot: () => call<PluginSnapshot>('plugins:snapshot'),
   pluginsInstall: (request: PluginInstallRequest) => call<PluginSnapshot>('plugins:install', request),

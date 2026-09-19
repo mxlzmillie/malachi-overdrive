@@ -1,6 +1,8 @@
 import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { macOSReleaseSigningRequired } from './macos-signing-policy.mjs';
 
 export function compareVersions(left, right) {
   const a = String(left).split('.').map((part) => Number.parseInt(part, 10));
@@ -146,4 +148,15 @@ export function assertDeveloperIdMacCodeSignature(file, codesignResult, expected
     throw new Error(`${file} is signed by TeamIdentifier ${teamId}, expected ${expectedTeamId}`);
   }
   return { authority, teamId };
+}
+
+/** A Developer ID seal alone does not prove Apple accepted the exact archived app. */
+export function assertMacOSReleaseNotarization(file, { env = process.env, inspect = spawnSync } = {}) {
+  if (!macOSReleaseSigningRequired(env)) return false;
+  const result = inspect('xcrun', ['stapler', 'validate', file], { encoding: 'utf8', timeout: 60_000 });
+  if (result.error || result.status !== 0) {
+    const detail = result.error?.message || String(result.stderr || result.stdout || `exit ${result.status}`).trim();
+    throw new Error(`${file} has no valid stapled Apple notarization ticket: ${detail}`);
+  }
+  return true;
 }

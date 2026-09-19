@@ -8,8 +8,8 @@
  * no third outcome, and in particular there is never a second replacement chat.
  *
  * The compaction *provider* is faked so its timing can be controlled. Everything else — the
- * bridge, the continuation transaction, the command queue, the session store and the browser
- * opener — is the real thing.
+ * bridge, the continuation transaction, the command queue and the session store are real;
+ * a virtual connected companion collects exact isolated placements over HTTP.
  */
 
 import http from 'node:http';
@@ -17,6 +17,15 @@ import fs from 'node:fs/promises';
 import nodePath from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContinuationSnapshot } from '../src/main/session/continuation.js';
+
+const companion = vi.hoisted(() => ({ connected: false, wake: vi.fn() }));
+vi.mock('../src/main/browser-wake.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../src/main/browser-wake.js')>();
+  return { ...original, attachBrowserWake: (...args: Parameters<typeof original.attachBrowserWake>) => {
+    const port = original.attachBrowserWake(...args);
+    return { ...port, connected: () => companion.connected || port.connected() };
+  }, wakeBrowserWork: () => { original.wakeBrowserWork(); companion.wake(); } };
+});
 
 vi.mock('electron', () => ({
   safeStorage: {
@@ -31,7 +40,7 @@ vi.mock('electron', () => ({
 
 const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSecretsPath, setSecret } = await import('../src/main/secrets.js');
-const { bridgePairingCode, bridgePort, pendingCommands, resetBridgeForTests, resumeJobFor, setBrowserOpener, startBridge, stopBridge } =
+const { bridgePairingCode, bridgePort, pendingCommands, resetBridgeForTests, resumeJobFor, commandUrl, startBridge, stopBridge } =
   await import('../src/main/bridge.js');
 const durable = await import('../src/main/durable.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableSoon } = durable;
@@ -53,8 +62,9 @@ const BRIEF = SAMPLE_BRIEF;
 let dir: string;
 let base: string;
 let token: string | null = null;
-/** Every URL the app asked the OS to open. */
+/** Every isolated command URL the companion received. */
 const opened: string[] = [];
+let companionFlight: Promise<void> = Promise.resolve();
 
 function request(
   method: string,
@@ -62,7 +72,9 @@ function request(
   options: { body?: unknown; auth?: string | null } = {}
 ): Promise<{ status: number; body: any }> {
   const url = new URL(path, base);
-  const payload = options.body === undefined ? null : JSON.stringify(options.body);
+  const body = path === '/commands/redeem' && options.body && typeof options.body === 'object'
+    ? { isolated: true, ...options.body } : options.body;
+  const payload = body === undefined ? null : JSON.stringify(body);
   // Every route past /hello, /pair included, refuses a caller that does not declare the
   // protocol it speaks. The shipped extension always sends this; a test that omitted it was
   // failing pairing with 426 and then reading every later 401 as a bridge bug.
@@ -104,6 +116,7 @@ function request(
 async function connect(): Promise<void> {
   const reply = await request('POST', '/pair', { auth: null, body: { code: bridgePairingCode() } });
   token = reply.body.token as string;
+  companion.connected = true;
 }
 
 /** Gives the bridge a recorded session for a chat, so /compact can find one. */
@@ -162,6 +175,17 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  companion.connected = false; await companionFlight;
+  companion.wake.mockImplementation(() => {
+    if (!companion.connected || pendingCommands().length === 0) return;
+    companionFlight = companionFlight.then(async () => {
+      if (!companion.connected || bridgePort() === null) return;
+      const reply = await request('GET', '/status'); const placement = reply.body.placement;
+      if (!placement) return;
+      expect(placement).toMatchObject({ background: true, active: false });
+      opened.push(commandUrl(placement.id, placement.model, placement.reasoningEffort, placement.project));
+    });
+  });
   resetBridgeForTests();
   resetRecorderForTests();
   resetSessionStoreForTests();
@@ -176,9 +200,6 @@ beforeEach(async () => {
   await setSecret('bridgeToken', '');
   token = null;
   opened.length = 0;
-  setBrowserOpener(async (url) => {
-    opened.push(url);
-  });
 });
 
 describe('the whole move, when it works', () => {
@@ -240,7 +261,7 @@ describe('the whole move, when it works', () => {
     const stored = await capture(continuation);
     expect(pendingCommands()).toHaveLength(1);
     // Handed to A's browser, not to the OS — and exactly one chat either way.
-    expect(stored.body.placement).toEqual({ id: pendingCommands()[0]!.id, model: null, reasoningEffort: null, active: true, homeConversationId: CHAT_A, project: null });
+    expect(stored.body.placement).toEqual({ id: pendingCommands()[0]!.id, model: null, reasoningEffort: null, background: true, active: false, homeConversationId: CHAT_A, project: null });
     expect(opened).toHaveLength(0);
   });
 });
@@ -410,7 +431,9 @@ describe('one press, one transaction', () => {
     expect((await sessionHandoffCount(sessionId)) - before).toBe(1);
     // And one replacement chat, not three.
     expect(pendingCommands()).toHaveLength(1);
-    expect(opened).toHaveLength(1);
+    const placements = [one, two, three].flatMap(reply => reply.body.placement ? [reply.body.placement.id] : []);
+    await companionFlight;
+    expect([...placements, ...opened.map(url => new URL(url).searchParams.get('clf'))]).toEqual([pendingCommands()[0]!.id]);
   });
 
   it('reports a rejected handoff WAL write as retryable while the continuation still awaits its brief', async () => {
@@ -617,9 +640,6 @@ describe('a restart in the middle', () => {
     const { restoreCommands } = await import('../src/main/bridge.js');
     resetBridgeForTests();
     opened.length = 0;
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     await restoreContinuations(continuationSnapshot);
     await restoreCommands();
 

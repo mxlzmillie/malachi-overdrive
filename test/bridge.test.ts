@@ -20,6 +20,20 @@ import type { Config } from '../src/shared/types.js';
 const recoveryBrowserWake = vi.hoisted(() => vi.fn(async (_url: string, _retry?: boolean, _background?: boolean,
   _authority?: { current(): boolean }) => {}));
 vi.mock('../src/main/browser-startup.js', () => ({ wakeBrowserUrl: recoveryBrowserWake }));
+// Most cases exercise durable bridge state under a fake clock. Supply a deterministic
+// connected companion port there; the explicit socket test below still uses the real port.
+const companion = vi.hoisted(() => ({ connected: false, wake: vi.fn() }));
+vi.mock('../src/main/browser-wake.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../src/main/browser-wake.js')>();
+  return {
+    ...original,
+    attachBrowserWake: (...args: Parameters<typeof original.attachBrowserWake>) => {
+      const port = original.attachBrowserWake(...args);
+      return { ...port, connected: () => companion.connected || port.connected() };
+    },
+    wakeBrowserWork: () => { original.wakeBrowserWork(); companion.wake(); }
+  };
+});
 
 async function recordFinalForTest(conversationId: string, turnId: string): Promise<void> {
   await request('POST', '/events', { body: { conversationId, events: [{ kind: 'assistant_message', time: Date.now(),
@@ -47,6 +61,7 @@ const {
   bridgePort,
   bridgeStatus,
   onBridgeChange,
+  requestWorkerChatReveal,
   compactSession,
   sessionControlsFor,
   setSessionObjective,
@@ -58,7 +73,6 @@ const {
   resetBridgeForTests,
   restoreCommands,
   resumeJobFor,
-  setBrowserOpener,
   shutdownBridge,
   STALE_SWARM_MS,
   CHAT_SILENCE_MS,
@@ -197,8 +211,10 @@ async function compactedSession(from: string, brief: string): Promise<{ sessionI
   return { sessionId, token: await readyContinuation(sessionId, brief, from) };
 }
 
-/** Every URL the app asked the OS to open, in order. Stands in for Electron's shell. */
+/** Every exact isolated surface requested through the authenticated companion, in order. */
 const opened: string[] = [];
+let companionFlight: Promise<void> = Promise.resolve();
+let onPlacement: (() => Promise<void>) | null = null;
 let anonymousRedeemIndex = 0;
 
 let dir: string;
@@ -217,7 +233,9 @@ function request(
   options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; extensionVersion?: string; protocol?: number; pairingCode?: boolean } = {}
 ): Promise<Reply> {
   const url = new URL(path, base);
-  const pairedBody = path === '/pair' && options.pairingCode !== false
+  const pairedBody = path === '/commands/redeem' && options.body && typeof options.body === 'object'
+    ? { isolated: true, ...options.body }
+    : path === '/pair' && options.pairingCode !== false
     ? { ...(options.body && typeof options.body === 'object' ? options.body : {}), code: bridgePairingCode() }
     : options.body;
   const payload = options.raw ?? (pairedBody === undefined ? null : JSON.stringify(pairedBody));
@@ -309,10 +327,11 @@ async function redeem(id?: string, client = 'tab-1'): Promise<any> {
 /** The configuration every test starts from; see beforeAll. */
 let suiteConfig: Config;
 
-async function pair(): Promise<string> {
+async function pair(withCompanion = true): Promise<string> {
   const reply = await request('POST', '/pair', { auth: null });
   expect(reply.status).toBe(200);
   token = reply.body.token as string;
+  companion.connected = withCompanion;
   return token;
 }
 
@@ -343,6 +362,22 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  companion.connected = false;
+  await companionFlight;
+  onPlacement = null;
+  companion.wake.mockImplementation(() => {
+    // This fixture owns placement only; repair/reveal tests perform their own status handouts.
+    if (!companion.connected || pendingCommands().length === 0) return;
+    companionFlight = companionFlight.then(async () => {
+      if (!companion.connected || bridgePort() === null) return;
+      const reply = await request('GET', '/status');
+      const placement = reply.body.placement;
+      if (!placement) return;
+      expect(placement).toMatchObject({ background: true, active: false });
+      opened.push(commandUrl(placement.id, placement.model, placement.reasoningEffort, placement.project));
+      await onPlacement?.();
+    });
+  });
   recoveryBrowserWake.mockClear();
   vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(true);
   // A test that writes its own config is not allowed to leak it into the next one.
@@ -354,11 +389,6 @@ beforeEach(async () => {
   resetBridgeForTests();
   opened.length = 0;
   anonymousRedeemIndex = 0;
-  // The app opens the chat itself, always: there is no queue for a tab to come and ask.
-  // Tests that need the open to fail replace this with their own opener.
-  setBrowserOpener(async (url) => {
-    opened.push(url);
-  });
   resetRecorderForTests();
   writeDurableSoon('bridge-commands', null);
   await flushDurable();
@@ -1337,20 +1367,20 @@ describe('activity feed', () => {
 describe('automatic compaction', () => {
   const settled = () => new Promise((resolve) => setTimeout(resolve, 25));
 
-  it('hands an explicit desktop compaction to startup and fences a cancelled ticket', async () => {
+  it('wakes the connected companion for explicit compaction and fences a cancelled ticket', async () => {
     await pair();
     const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac98';
     const session = await createSession({ conversationId });
+    companion.wake.mockClear();
     await compactSession(session.id);
-    expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
-    const [url, , , authority] = recoveryBrowserWake.mock.calls[0]!;
-    expect(url).toBe(`https://chatgpt.com/c/${conversationId}`);
-    expect(authority?.current()).toBe(true);
+    expect(companion.wake).toHaveBeenCalled();
+    expect(recoveryBrowserWake).not.toHaveBeenCalled();
+    expect(continuationForSession(session.id)?.from).toBe(conversationId);
     abortContinuation(continuationForSession(session.id)!.token, 'user_cancelled');
-    expect(authority?.current()).toBe(false);
+    expect(continuationForSession(session.id)).toBeNull();
   });
 
-  it('recovers a manual compaction with Auto Off and revokes cold startup on cancel', async () => {
+  it('offers one isolated manual-compaction repair with Auto Off and revokes it on cancel', async () => {
     vi.useFakeTimers();
     try {
       await pair();
@@ -1367,17 +1397,15 @@ describe('automatic compaction', () => {
       expect(continuationForSession(ticket.sessionId)?.token).toBe(ticket.token);
       await vi.advanceTimersByTimeAsync(2 * 60_000);
       await sweepStaleSwarm(Date.now());
-      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
-      const [url, , , authority] = recoveryBrowserWake.mock.calls[0]!;
-      expect(url).toBe(`https://chatgpt.com/c/${conversationId}`);
-      expect(authority?.current()).toBe(true);
+      const repair = (await request('GET', '/status')).body.repairs.find((row: any) => row.conversationId === conversationId);
+      expect(repair).toMatchObject({ conversationId, reason: 'compaction' });
       await sweepStaleSwarm(Date.now());
-      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
+      expect((await request('GET', '/status')).body.repairs.filter((row: any) => row.conversationId === conversationId)).toEqual([expect.objectContaining({ conversationId, reason: 'compaction' })]);
       abortContinuation(ticket.token, 'user_cancelled');
-      expect(authority?.current()).toBe(false);
+      expect((await request('GET', '/status')).body.repairs.some((row: any) => row.conversationId === conversationId)).toBe(false);
       await vi.advanceTimersByTimeAsync(5 * 60_000);
       await sweepStaleSwarm(Date.now());
-      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
+      expect(recoveryBrowserWake).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
   });
 
@@ -1636,7 +1664,7 @@ describe('automatic compaction', () => {
       for (let attempt = 0; attempt < 5; attempt += 1) {
         await vi.advanceTimersByTimeAsync(attempt === 0 ? 1 : 2 * 60_000);
         const handout = await takeRepair();
-        expect(handout).toMatchObject({ conversationId, reason: 'compaction', focus: true });
+        expect(handout).toMatchObject({ conversationId, reason: 'compaction', focus: false });
         await request('GET', `/status?repaired=${handout!.token}&repairAction=reloaded`);
         expect(continuationByToken(token)).toMatchObject({ state: 'awaiting-summary' });
       }
@@ -1761,9 +1789,6 @@ describe('delivering a bootstrap', () => {
 
     resetBridgeForTests();
     opened.length = 0;
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     await restoreContinuations(continuationSnapshot!);
     return {
       revivalId,
@@ -1782,9 +1807,6 @@ describe('delivering a bootstrap', () => {
     await stopBridge();
     resetBridgeForTests();
     opened.length = 0;
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     resetSwarm();
     spawn({ workers: [{ task: 'must not open during shutdown' }], caller: { conversationId: PRIME_CHAT } });
     expect(pendingWorkerSpawns()).toHaveLength(1);
@@ -1800,9 +1822,6 @@ describe('delivering a bootstrap', () => {
     // Restore the suite's ordinary live bridge without replaying the deliberately cancelled run.
     resetSwarm();
     resetBridgeForTests();
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     const restarted = await startBridge();
     expect(restarted).not.toBeNull();
     base = `http://127.0.0.1:${restarted}`;
@@ -1879,7 +1898,7 @@ describe('delivering a bootstrap', () => {
     expect(pendingCommands()).toEqual([]);
   });
 
-  it('protects a resume destination before the browser opener can record a shadow session', async () => {
+  it('protects a resume destination before companion placement can record a shadow session', async () => {
     await pair();
     const from = '91919191-1111-2222-3333-444444444444';
     const destination = '92929292-1111-2222-3333-444444444444';
@@ -1891,11 +1910,11 @@ describe('delivering a bootstrap', () => {
     // Unless the bridge announces the pending replacement *before* opening the browser, the
     // recorder eagerly creates a second local session for B. The later ACK then refuses the
     // real A→B move with "the replacement chat already belongs to another local session".
-    setBrowserOpener(async () => {
+    onPlacement = async () => {
       earlyObservation = recordChatObservations(destination, [
         { kind: 'conversation_title', time: Date.now(), text: 'Resumed · carry this session forward' }
       ]);
-    });
+    };
 
     const command = queueResume(sessionId, continuation)!;
     await vi.waitFor(() => expect(earlyObservation).not.toBeNull());
@@ -3154,9 +3173,6 @@ describe('delivering a bootstrap', () => {
     await stopBridge();
     resetBridgeForTests();
     opened.length = 0;
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     let brokerPersistenceCalls = 0;
     onSwarmPersistNow(async (snapshot) => {
       brokerPersistenceCalls++;
@@ -3210,9 +3226,6 @@ describe('delivering a bootstrap', () => {
     restoreSwarm(fixture.durableSwarm);
     resetBridgeForTests();
     opened.length = 0;
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     await restoreContinuations(fixture.continuationSnapshot);
     const restarted = await startBridge();
     expect(restarted).not.toBeNull();
@@ -3712,6 +3725,7 @@ describe('delivering a bootstrap', () => {
   });
 
   it('parks an unacknowledged terminal history immediately while preserving its prime report', async () => {
+    await pair();
     spawn({ workers: [{ task: 'stale fallback proof' }], caller: { conversationId: PRIME_CHAT } });
     const workerConversation = 'stale-worker-terminal';
     expect(bindConversation('worker-1', workerConversation)).toBe(true);
@@ -3744,6 +3758,7 @@ describe('delivering a bootstrap', () => {
    * blocked worker from the durable block alone, whatever state its slot is in.
    */
   it('sleeps a blocked worker on the next sweep, active or detached, without any silence clock', async () => {
+    await pair();
     spawn({
       workers: [{ task: 'blocked while attached' }, { task: 'blocked while detached' }],
       caller: { conversationId: PRIME_CHAT }
@@ -3771,6 +3786,7 @@ describe('delivering a bootstrap', () => {
   });
 
   it('periodically sleeps a silent detached worker and wakes already-queued work without another MCP call', async () => {
+    await pair();
     spawn({ workers: [{ task: 'detached silence maintenance' }], caller: { conversationId: PRIME_CHAT } });
     const workerConversation = 'silent-detached-worker';
     expect(bindConversation('worker-1', workerConversation)).toBe(true);
@@ -3796,6 +3812,7 @@ describe('delivering a bootstrap', () => {
   });
 
   it('still releases worker capacity when the durable prime turn remains open', async () => {
+    await pair();
     spawn({ workers: [{ task: 'open turn veto' }], caller: { conversationId: PRIME_CHAT } });
     const workerConversation = 'stale-worker-open-prime';
     expect(bindConversation('worker-1', workerConversation)).toBe(true);
@@ -3821,6 +3838,7 @@ describe('delivering a bootstrap', () => {
   });
 
   it('stale-releases after page detach durably closes the exact active turn even if broker cleanup was lost', async () => {
+    await pair();
     spawn({ workers: [{ task: 'detach crash proof' }], caller: { conversationId: PRIME_CHAT } });
     const workerConversation = 'stale-worker-prime-detached';
     expect(bindConversation('worker-1', workerConversation)).toBe(true);
@@ -3844,6 +3862,7 @@ describe('delivering a bootstrap', () => {
   });
 
   it('defers stale release while Compact & Resume owns the prime transfer', async () => {
+    await pair();
     spawn({ workers: [{ task: 'transfer veto' }], caller: { conversationId: PRIME_CHAT } });
     const workerConversation = 'stale-worker-transfer';
     expect(bindConversation('worker-1', workerConversation)).toBe(true);
@@ -3965,11 +3984,33 @@ describe('delivering a bootstrap', () => {
     expect(saved).not.toMatch(/key/i);
 
     resetBridgeForTests();
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     await restoreCommands();
     expect(pendingCommands()).toEqual([{ id: offered.id, what: `worker:${currentRunId()}:worker-1`, lastError: null }]);
+  });
+
+  it('restores worker model, effort and task from the durable broker instead of a stale transport snapshot', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'preserve exact restart selection', model: 'gpt-6-pro', reasoning_effort: 'pro' }], caller: { conversationId: PRIME_CHAT } });
+    const offered = await redeem();
+    await flushDurable();
+    const saved = await readDurable<any>('bridge-commands');
+    const row = saved?.commands?.find((entry: any) => entry?.id === offered.id);
+    expect(row).toBeTruthy();
+    // Simulate a stale/corrupt transport generation. Both replacements are individually valid,
+    // so syntax validation alone would silently run a different worker after restart.
+    row.spec.task = 'stale transport task';
+    row.spec.model = 'gpt-5.6-sol';
+    row.spec.reasoningEffort = 'medium';
+    await writeDurableNow('bridge-commands', saved);
+
+    resetBridgeForTests();
+    await restoreCommands();
+    const restored = await readDurable<any>('bridge-commands');
+    expect(restored?.commands?.find((entry: any) => entry?.id === offered.id)?.spec).toMatchObject({
+      task: 'preserve exact restart selection',
+      model: 'gpt-6-pro',
+      reasoningEffort: 'pro'
+    });
   });
 
   it('never adopts a durable worker command from an older swarm incarnation', async () => {
@@ -3993,9 +4034,6 @@ describe('delivering a bootstrap', () => {
     resetBridgeForTests();
     opened.length = 0;
     anonymousRedeemIndex = 0;
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     await writeDurableNow('bridge-commands', staleSnapshot);
     await restoreCommands();
     expect(pendingCommands(), 'run A command was resurrected into run B').toEqual([]);
@@ -4021,9 +4059,6 @@ describe('delivering a bootstrap', () => {
 
     resetBridgeForTests();
     opened.length = 0;
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     await restoreContinuations(snapshot);
     await restoreCommands();
     expect(pendingCommands()).toEqual([{ id: command.id, what: `resume:${source.id}`, lastError: null }]);
@@ -4215,7 +4250,7 @@ ${SAMPLE_BRIEF}` }
     const stored = await captureFrom(HOME);
 
     expect(stored.body.stored).toBe(true);
-    expect(stored.body.placement).toMatchObject({ id: stored.body.commandId, model: null, reasoningEffort: null, active: true });
+    expect(stored.body.placement).toMatchObject({ id: stored.body.commandId, model: null, reasoningEffort: null, background: true, active: false });
     // The whole point: this app did not ask the operating system where its own chat should go.
     expect(opened).toEqual([]);
     expect(pendingCommands()).toEqual([
@@ -4271,21 +4306,10 @@ ${SAMPLE_BRIEF}` }
 
 // ----------------------------------------------------------------- delivery
 
-/**
- * The app opening the chat itself.
- *
- * Every case here is one the old pull-only delivery could not serve: it queued a command
- * and waited for a ChatGPT tab's content script to ask for it, so with no ChatGPT tab —
- * or no browser — the queue simply sat there and surfaced minutes later as tabs the user
- * had stopped expecting.
- */
-describe('targeted open', () => {
-  it('opens the fresh chat the instant a resume is queued, with no tab and no timer involved', async () => {
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
-    // Deliberately not paired and never polled: this is the "Chrome closed, no ChatGPT
-    // tab, extension asleep" case, and the open has to happen anyway.
+/** Only a connected companion may create a successor; absence never grants an OS open. */
+describe('isolated command placement', () => {
+  it('wakes the companion for an isolated resume without waiting for a page timer', async () => {
+    await pair();
     const command = queueResume('session-open', 'handoff-open')!;
 
     await waitForOpened(1);
@@ -4294,39 +4318,36 @@ describe('targeted open', () => {
     expect(resumeJobFor('session-open')).toBeNull();
   });
 
-  it('ends a browser-open rejection immediately rather than blocking the command queue', async () => {
-    setBrowserOpener(async () => {
-      throw new Error('no browser');
-    });
-    queueResume('session-nobrowser', 'handoff-nobrowser');
-    // The lease write and opener rejection are both asynchronous.
-    await vi.waitFor(() => expect(pendingCommands()).toEqual([]));
-
+  it('ends a resume when the companion cannot create its isolated surface', async () => {
+    await pair();
+    const { sessionId, token } = await compactedSession('88888888-7777-6666-5555-444444444444', 'carry on');
+    const command = queueResume(sessionId, token)!;
+    await waitForOpened(1);
+    expect((await request('POST', '/commands/background-failed', { body: { id: command.id } })).status).toBe(200);
     expect(pendingCommands()).toEqual([]);
+    expect(continuationByToken(token)?.state).toBe('aborted');
   });
 
   /**
-   * No opener at all is an ending, not a wait.
+   * A missing companion is an ending, not a wait.
    *
    * There used to be a poll route behind this: a command nothing could open simply sat in
    * the queue until some ChatGPT tab came and asked for it. With that gone, a queue with no
    * reader is a job that can never happen, so it fails here — the continuation aborts, the
    * session stays in the chat it is in, and nothing is left for a later sweep to find.
    */
-  it('ends a command outright when this process cannot open a browser at all', async () => {
-    setBrowserOpener(null);
-    await pair();
+  it('ends a resume without a connected companion and never silently opens a foreground browser', async () => {
+    await pair(false);
     const { sessionId, token } = await compactedSession('77777777-8888-9999-aaaa-bbbbbbbbbbbb', 'carry on');
     queueResume(sessionId, token);
 
     expect(pendingCommands()).toEqual([]);
     expect(continuationByToken(token)?.state).toBe('aborted');
+    expect(opened).toEqual([]);
   });
 
   it('collapses repeated presses for one session into one job, one command and one tab', async () => {
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
+    await pair();
     const first = queueResume('session-once', 'handoff-1')!;
     const second = queueResume('session-once', 'handoff-1')!;
     const third = queueResume('session-once', 'handoff-1')!;
@@ -4340,9 +4361,6 @@ describe('targeted open', () => {
   });
 
   it('supersedes a queued resume in place when the same session is compacted again', async () => {
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     await pair();
     const chat = '33333333-4444-5555-6666-777777777777';
     const older = await compactedSession(chat, 'the older brief');
@@ -4386,9 +4404,6 @@ describe('targeted open', () => {
   it('ends the continuation when the chat it opened never reports back', async () => {
     vi.useFakeTimers();
     try {
-      setBrowserOpener(async (url) => {
-        opened.push(url);
-      });
       await pair();
       const { sessionId, token } = await compactedSession('44444444-5555-6666-7777-888888888888', 'carry on');
       const command = queueResume(sessionId, token)!;
@@ -4408,9 +4423,6 @@ describe('targeted open', () => {
   });
 
   it('withdraws a cancelled resume so no tab opens for it afterwards', async () => {
-    setBrowserOpener(async (url) => {
-      opened.push(url);
-    });
     await pair();
     const command = queueResume('session-cancel', 'handoff-cancel')!;
     await waitForOpened(1);
@@ -4447,9 +4459,6 @@ describe('targeted open', () => {
   it('keeps a redeemed resume alive past the short ACK deadline without outliving its continuation', async () => {
     vi.useFakeTimers();
     try {
-      setBrowserOpener(async (url) => {
-        opened.push(url);
-      });
       await pair();
       const sourceConversation = '44444444-5555-6666-7777-888888888888';
       const { sessionId, token } = await compactedSession(
@@ -4483,8 +4492,60 @@ describe('targeted open', () => {
 // ------------------------------------------------------- worker bootstrap failure
 
 describe('a worker chat that never opens', () => {
-  it.each([true, false])('places two workers in the background regardless of the general chat preference=%s', async (backgroundChats) => {
+  it('withholds worker instructions until the companion proves isolated placement', async () => {
     await pair();
+    spawn({ workers: [{ task: 'private worker instructions' }], caller: { conversationId: PRIME_CHAT } });
+    await waitForOpened();
+    const id = new URL(opened[0]!).searchParams.get('clf')!;
+    for (const isolated of [false, undefined]) {
+      const denied = await request('POST', '/commands/redeem', { body: { id, client: 'foreground-tab', isolated } });
+      expect(denied.status).toBe(409);
+      expect(denied.body).toMatchObject({ error: 'BACKGROUND_UNAVAILABLE' });
+      expect(JSON.stringify(denied.body)).not.toContain('private worker instructions');
+    }
+    expect(pendingCommands().some(row => row.id === id)).toBe(true);
+    expect((await redeem(id, 'isolated-tab')).text).toContain('private worker instructions');
+  });
+
+  it('ends a failed isolated placement without letting that report cancel an already claimed sibling', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'no background window' }, { task: 'already claimed' }], caller: { conversationId: PRIME_CHAT } });
+    await waitForOpened(2);
+    const firstId = new URL(opened[0]!).searchParams.get('clf')!;
+    const secondId = new URL(opened[1]!).searchParams.get('clf')!;
+    await redeem(secondId, 'owned-isolated-tab');
+    expect((await request('POST', '/commands/background-failed', { body: { id: secondId } })).status).toBe(409);
+    expect(pendingCommands().some(row => row.id === secondId)).toBe(true);
+    expect((await request('POST', '/commands/background-failed', { body: { id: firstId } })).status).toBe(200);
+    expect(swarmState().agents.find(row => row.id === 'worker-1')).toMatchObject({
+      state: 'failed', result: expect.stringContaining('BACKGROUND_UNAVAILABLE')
+    });
+    expect(pendingCommands().some(row => row.id === firstId)).toBe(false);
+    expect(opened).toHaveLength(2);
+  });
+
+  it('reveals only the exact selected worker after a matching browser acknowledgement', async () => {
+    await pair();
+    spawn({ workers: [{ task: 'show this worker deliberately' }], caller: { conversationId: PRIME_CHAT } });
+    const bootstrap = await redeem();
+    const conversationId = 'cafe0919-1111-4222-8333-444444444444';
+    await request('POST', '/commands/ack', { body: { id: bootstrap.id, status: 'sent', agent: 'worker-1', conversationId } });
+    await companionFlight;
+    companion.wake.mockImplementation(() => {}); // This test, not the placement adapter, owns the reveal receipt.
+    const revealed = requestWorkerChatReveal(conversationId);
+    const reveal = (await request('GET', '/status')).body.chatReveal;
+    expect(reveal).toMatchObject({ id: expect.any(String), conversationId });
+    expect((await request('GET', '/status')).body.chatReveal).toBeNull();
+    expect((await request('POST', '/browser/worker-reveal', { body: { ...reveal, id: 'wrong', ok: true } })).status).toBe(409);
+    expect((await request('POST', '/browser/worker-reveal', { body: { ...reveal, conversationId: PRIME_CHAT, ok: true } })).status).toBe(409);
+    expect((await request('POST', '/browser/worker-reveal', { body: { ...reveal, ok: true } })).status).toBe(200);
+    await expect(revealed).resolves.toBe(true);
+    expect(opened).toHaveLength(1); // Revealing cannot issue another OS open or marker.
+    expect((await request('POST', '/browser/worker-reveal', { body: { ...reveal, ok: true } })).status).toBe(409);
+  });
+
+  it.each([true, false])('places two workers in the background regardless of the general chat preference=%s', async (backgroundChats) => {
+    await pair(false);
     const config = getConfig();
     await saveConfig({ ...config, ui: { ...config.ui, backgroundChats } });
     await request('GET', '/status');
@@ -4544,28 +4605,12 @@ describe('a worker chat that never opens', () => {
     expect(next.agent).toBe('worker-2');
   });
 
-  /**
-   * One cold browser start at a time, because a second one is a second browser.
-   *
-   * Handing a URL to a browser that is already running is free. Handing one to a machine with
-   * no browser running is a cold start, and a second open fired into that window does not join
-   * the instance still booting — it becomes an instance of its own, with its own tabs and its
-   * own memory. Delivery advances the moment a command ends, so a browser that never came back
-   * was answered with one cold start per queued command, and every close the user performed was
-   * answered with another. Live on 2026-09-01: eight Chrome process trees, each holding its own
-   * ChatGPT tabs, together pegging the machine.
-   */
-  it('waits for one cold browser start rather than stacking a second', async () => {
-    await pair();
+  // Worker admission cannot turn missing isolation into an OS browser-opening attempt.
+  it('fails background workers without a connected companion instead of starting a foreground browser', async () => {
+    await pair(false);
     vi.useFakeTimers();
     try {
-      const attempts: string[] = [];
-      setBrowserOpener(async (url) => {
-        attempts.push(url);
-        throw new Error('the browser is still starting');
-      });
-      // The user closed the browser: nothing has reported for longer than presence lasts, so
-      // every open from here is a cold start rather than a URL handed to a running browser.
+      // An old browser-presence observation cannot replace a live companion connection.
       await vi.advanceTimersByTimeAsync(61_000);
 
       spawn({ workers: [{ task: 'first audit' }, { task: 'second audit' }], caller: { conversationId: PRIME_CHAT } });
@@ -4573,18 +4618,18 @@ describe('a worker chat that never opens', () => {
       await vi.advanceTimersByTimeAsync(10);
       await flushDurable();
 
-      // worker-1's open failed and ended its command, so delivery advanced to worker-2 in the
-      // same beat. That is the beat this guard exists for: worker-2 waits for the browser
-      // worker-1 asked for instead of asking the operating system for a second one.
-      expect(attempts).toHaveLength(1);
-      expect(pendingCommands().some((command) => command.what === `worker:${currentRunId()}:worker-2`)).toBe(true);
+      expect(opened).toEqual([]);
+      expect(pendingCommands()).toEqual([]);
+      for (const worker of swarmStateForCaller({ conversationId: PRIME_CHAT }).agents.filter(row => row.role === 'worker')) {
+        expect(worker.state).toBe('failed');
+        expect(worker.result).toContain('BACKGROUND_UNAVAILABLE');
+      }
 
-      // Still nothing has reported, so the launch is now one this app has stopped believing in
-      // and worker-2 may have its own.
+      // Time never turns missing isolation into permission to cold-start the user's browser.
       await vi.advanceTimersByTimeAsync(60_001);
       await flushDurable();
       await vi.advanceTimersByTimeAsync(10);
-      expect(attempts).toHaveLength(2);
+      expect(opened).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
@@ -5218,9 +5263,6 @@ describe('unattributed activity recovery', () => {
         resetBridgeForTests();
         resetRecorderForTests();
         opened.length = 0;
-        setBrowserOpener(async (url) => {
-          opened.push(url);
-        });
         await pair();
         await events(PRIME, [openTurn(`turn-${outcome}`), endTurn(`turn-${outcome}`, outcome)]);
         await unattributed();
@@ -7320,8 +7362,10 @@ describe('restarting the bridge', () => {
     const port = await startBridge();
     expect(port).not.toBeNull();
     base = `http://127.0.0.1:${port}`;
-    await waitForOpened(1);
-    expect(pendingCommands().map((command) => command.what)).toEqual([`worker:${currentRunId()}:worker-1`]);
+    await vi.waitFor(() => expect(pendingCommands()).toEqual([]));
+    expect(opened).toEqual([]);
+    expect(swarmStateForCaller({ conversationId: PRIME_CHAT }).agents.find(row => row.id === 'worker-1'))
+      .toMatchObject({ state: 'failed', result: expect.stringContaining('BACKGROUND_UNAVAILABLE') });
   });
 
   it('does not queue or reopen a sleeping worker through a stale revival callback while stopped', async () => {
@@ -7503,9 +7547,7 @@ describe('the goal loop over the bridge', () => {
 
       await vi.advanceTimersByTimeAsync(2 * 60_000);
       await sweepStaleSwarm(Date.now());
-      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
-      const [, , , authority] = recoveryBrowserWake.mock.calls[0]!;
-      expect(authority?.current()).toBe(true);
+      expect((await request('GET', '/status')).body.repairs).toEqual(expect.arrayContaining([expect.objectContaining({ conversationId: chat, reason: 'goal' })]));
 
       const config = getConfig();
       await saveConfig({
@@ -7514,10 +7556,10 @@ describe('the goal loop over the bridge', () => {
         // This is the real edge: another feature keeps the shared bridge alive.
         multiAgent: { ...config.multiAgent, enabled: true }
       });
-      expect(authority?.current()).toBe(false);
 
       const status = await request('GET', '/status');
       expect(status.body.repairs).toEqual([]);
+      expect(recoveryBrowserWake).not.toHaveBeenCalled();
       // Recording Off suspends execution; it does not destructively rewrite the Goal ledger.
       expect(goalPendingReplyFor(chat)).not.toBeNull();
     } finally {
@@ -8470,7 +8512,7 @@ describe('the goal loop over the bridge', () => {
    * app typing into somebody's browser about an answer already on screen, and a page that has
    * not come back inside half an hour is not coming back.
    */
-  it('hands one queued Goal recovery to the shared browser startup owner and revokes it on Off', async () => {
+  it('hands one queued Goal recovery to the isolated companion and revokes it on Off', async () => {
     vi.useFakeTimers();
     try {
       await pair();
@@ -8484,24 +8526,19 @@ describe('the goal loop over the bridge', () => {
       expect(recoveryBrowserWake).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(2 * 60_000);
       await sweepStaleSwarm(Date.now());
-      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
-      const [url, retry, , authority] = recoveryBrowserWake.mock.calls[0]!;
-      expect(url).toBe(`https://chatgpt.com/c/${chat}`);
-      expect(retry).toBe(true);
-      expect(authority?.current).toEqual(expect.any(Function));
-      expect(authority?.current()).toBe(true);
+      const repair = (await request('GET', '/status')).body.repairs.find((row: any) => row.conversationId === chat);
+      expect(repair).toMatchObject({ conversationId: chat, reason: 'goal' });
       const config = getConfig();
       await saveConfig({ ...config, ui: { ...config.ui, browserOnly: true } });
-      expect(authority?.current()).toBe(false);
+      expect((await request('GET', '/status')).body.browserOnly).toBe(true);
       await saveConfig(config);
-      expect(authority?.current()).toBe(true);
       await sweepStaleSwarm(Date.now());
-      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
+      expect((await request('GET', '/status')).body.repairs.filter((row: any) => row.conversationId === chat)).toEqual([expect.objectContaining({ conversationId: chat, reason: 'goal' })]);
       await request('POST', '/settings', { body: { conversationId: chat, goal: false } });
-      expect(authority?.current()).toBe(false);
+      expect((await request('GET', '/status')).body.repairs.some((row: any) => row.conversationId === chat)).toBe(false);
       await vi.advanceTimersByTimeAsync(5 * 60_000);
       await sweepStaleSwarm(Date.now());
-      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
+      expect(recoveryBrowserWake).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
   });
 
@@ -8995,7 +9032,6 @@ describe('independent prime browser transports', () => {
     const commandIds = pendingCommands().map(c => c.id);
     const saved = JSON.parse(JSON.stringify(snapshotSwarm()));
     resetBridgeForTests();
-    setBrowserOpener(async url => { opened.push(url); });
     // Restore starts before bridge registration in production, so no replay callback can
     // create a replacement command before the separately durable transport is restored.
     const { onSpawnRequest } = await import('../src/main/agents.js');

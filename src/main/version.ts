@@ -12,7 +12,7 @@
  * extension does nothing" into a diagnosable mismatch.
  */
 
-export const APP_VERSION = '2.0.20';
+export const APP_VERSION = '2.0.21';
 
 declare const __MALACHI_OVERDRIVE_RELEASE_REPOSITORY__: string | undefined;
 
@@ -87,4 +87,4 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // draft ownership. A 12 companion would silently send text without these files.
 // 14 — bridge pairing requires an app-window one-time code. A 13 companion cannot
 // supply it and must not silently spin on an unauthenticated provisioning request.
-export const BRIDGE_PROTOCOL = 14;
+export const BRIDGE_PROTOCOL = 15;

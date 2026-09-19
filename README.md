@@ -1,6 +1,6 @@
 > [!IMPORTANT]
-> **2.0.11 — MALACHI OVERDRIVE overnight stability release.** Multi-agent runs now admit three workers atomically, verify requested GPT-6 Pro/Astra lanes against ChatGPT's live account model catalog before opening any worker, and keep an already-owned Pro worker alive through temporary provider access throttles instead of silently falling back or duplicating tabs.
-> Model discovery now reads your account's native picker state across languages and nested version menus.
+> **Ambient Work Mode — current source.** Keep working while the compact edge capsule shows real task activity. Open its preview or the full workbench when you choose. Desktop-origin tasks use an isolated background browser surface; unavailable isolation produces a visible error instead of taking over your active tab.
+> Requested models and reasoning levels still require confirmation from your account's live model catalog.
 > See [Browser behavior](#browser-behavior-in-the-current-source) for tab reuse, Browser only and native file attachments.
 
 
@@ -84,7 +84,7 @@ Windows and AppImage installs check GitHub for a newer release on start and ever
 
 **Debian and Ubuntu: prefer the DEB.** The AppImage uses electron-builder's static launcher. On a host that disables unprivileged user namespaces, that launcher can fall back to starting Chromium with `--no-sandbox` so the app still opens. If you do not want that fallback, use the DEB.
 
-**The builds are not publisher-signed yet**, and macOS builds are not notarized. SmartScreen, Gatekeeper or your browser will warn. Verify the hash first, then use the normal "run anyway" path, or [build from source](#building).
+Public macOS releases require Developer ID signing and Apple notarization for both Intel and Apple silicon. Windows installers are not publisher-signed. Verify the published SHA-256 checksum before installing, or [build from source](#building).
 
 ```powershell
 Get-FileHash .\MALACHI-OVERDRIVE-Setup-x64.exe -Algorithm SHA256   # Windows
@@ -160,6 +160,36 @@ The gear holds the per-chat Goal/Loop controls, task editor, plan creation and C
 
 During work, **Inject now** queues messages for tool delivery; multiple injections can wait together until the next eligible call. A plan advances one stage at a time at `session_finish` for Astra, or after a completed answer for ordinary models. Queue cards can be edited or cancelled. Delivery status follows the tool handout, and earlier transcript pages remain accessible.
 
+### Ambient Work Mode
+
+The edge capsule shows the selected task's recorded state, elapsed time and active worker count.
+Click it for a compact preview of the model and reasoning evidence, latest activity, workers and
+recorded outputs. **Open workbench** opens the full Control Rail. Closing either view leaves work
+running and preserves your draft. Completion feedback follows a real finished task and is not
+replayed for old history after restart. Elapsed time is measured; progress and completion times
+are not invented when the engine has no reliable estimate.
+
+**Pause follow-ups** prevents later Goal/Loop instructions; the current provider reply can continue.
+**Stop safely** targets the selected live turn; other workers continue independently. Retry is offered
+only when the stored send is safe to retry. **Open output** reveals a recorded created/edited file
+inside a currently approved folder.
+
+All desktop-origin sends require the connected matching browser companion and an isolated background
+surface. The app does not launch a foreground browser to recover a missing companion. Explicitly
+opening a linked chat is a user action and can reveal its window. To use the physical screen,
+keyboard, mouse or clipboard, select **Allow foreground control** for that exact live task in the
+preview. The grant lasts for the current turn and is cleared by restart or Stop; app permissions
+and macOS Screen Recording/Accessibility remain separate requirements. This native Desktop gate
+does not sandbox arbitrary shell programs or external plugins.
+
+**Full browser restart limitation:** companion suspension within the same browser session retains
+window ownership, but restarting the whole browser can lose that proof. The app does not adopt a
+restored window merely because it is minimized or shows the right conversation. When ownership
+cannot be proven, browser actions stop with `BACKGROUND_UNAVAILABLE`; task history remains available
+and no message is automatically resent or marked complete. Only a fresh, safely unsent opening
+request may create a new isolated tab. Reconnection alone does not guarantee that interrupted work
+can continue automatically.
+
 ### Compact & Resume
 
 The app estimates context pressure locally. Fresh installs warn at about 400k estimated tokens, mark 533k as the ceiling, and enable automatic compaction at 400k. **Pro models never auto-compact**, regardless of that setting. Other eligible chats follow the configured threshold and live-work checks. These are local estimates, not ChatGPT's own counter.
@@ -182,7 +212,7 @@ For the API backend, choose OpenRouter or a custom OpenAI-compatible endpoint un
 
 One prime chat can open up to eight concurrent worker chats (three slots on a fresh install; older configurations without a saved limit use two) and exchange brokered messages with them through the `agents` tool. Provider rate limits still apply. Workers cannot talk to each other.
 
-Workers are reusable conversations. When one reports its result it goes to sleep, frees its slot and keeps its full chat. Messaging it again wakes the same conversation. At about 400k recorded tokens a worker becomes non-revivable after its next stop; workers never compact themselves. With background chats enabled, app-managed tabs share one browser window. Sleeping and finished worker tabs become eligible for closure after one minute, even below the worker limit. This releases browser memory while preserving the reusable conversation. Active chats and unsent drafts remain protected.
+Workers are reusable conversations. When one reports its result it goes to sleep, frees its slot and keeps its full chat. Messaging it again wakes the same conversation in the isolated browser workspace. At about 400k recorded tokens a worker becomes non-revivable after its next stop; workers never compact themselves. Waiting chats and reusable sleeping workers remain open for follow-ups. Terminal non-revivable, blocked or superseded chats may be retired only after fresh draft, generation and document checks. Ordinary browser-opening preferences cannot move worker execution into your active browsing window.
 
 Each prime owns its worker history. If the last worker sleeps, the run is parked and another chat can start its own workers; the original prime still sees its full history in `agents action=status`, can spawn fresh workers, and can wake old ones when the execution slot is free. Turning multi-agent off pauses execution and keeps that history. **Clear swarm** is what discards it.
 
@@ -196,7 +226,7 @@ A wedged ChatGPT page can leave a turn running with no working Stop button while
 
 - **File tools stay inside approved folders.** Paths are validated and canonicalised first. This is application-level containment, not an OS sandbox; same-user filesystem races remain possible.
 - **Commands are not folder-sandboxed.** They start in an approved folder and then run with your normal user privileges.
-- **Desktop control is not folder-scoped.** When enabled, it applies to the whole Windows or macOS desktop. On macOS it is off until you switch it on, and macOS additionally enforces its own Screen Recording and Accessibility grants.
+- **Desktop control is not folder-scoped.** Model calls require an explicit foreground grant for the exact current task/turn, as well as enabled app permissions. The grant can expose the whole desktop. On macOS those permissions start off, and macOS additionally enforces its own Screen Recording and Accessibility grants.
 - **The MCP server is loopback-only** behind a random secret path. ChatGPT reaches it through the tunnel you configure. Treat any public tunnel URL as a password.
 - **The browser bridge is loopback-only and separate.** It exists for the extension and exposes no file, command or settings routes.
 - **Secrets use Electron `safeStorage`:** DPAPI on Windows, Keychain on macOS, libsecret or KWallet on Linux.
@@ -212,9 +242,9 @@ The MCP connector uses ChatGPT's documented Developer mode and Secure MCP Tunnel
 
 The published 2.0.6 build's English-language and nested-picker workaround remains relevant until you install a build containing these fixes. The current source reads account-evaluated model IDs, available efforts and version choices instead of English picker labels. New model families appear after **Reload ChatGPT models**, provided ChatGPT exposes them to your account in the supported picker structure. Discovery restores the previous selection and sends no message.
 
-The current composer accepts dropped files (including Markdown) and dropped text, or **Add photos & files**. Files keep their original bytes and appear as compact filename cards above the message. For browser delivery, prepared messages longer than 8,000 characters are sent as an attached text file with a short instruction to read it; the original authored message remains in local history. Up to 20 files and 512 MB total can be prepared per message; ChatGPT's account, format and upload limits still determine acceptance. Files wait for the next native message when a turn is running. The app sends only after every attachment is confirmed and the draft is still unchanged. A failed upload leaves a visible error and is never automatically resent. Install the matching protocol-14 companion with this source build and enter the one-time code from **Setup → Browser** in its popup.
+The current composer accepts dropped files (including Markdown) and dropped text, or **Add photos & files**. Files keep their original bytes and appear as compact filename cards above the message. For browser delivery, prepared messages longer than 8,000 characters are sent as an attached text file with a short instruction to read it; the original authored message remains in local history. Up to 20 files and 512 MB total can be prepared per message; ChatGPT's account, format and upload limits still determine acceptance. Files wait for the next native message when a turn is running. The app sends only after every attachment is confirmed and the draft is still unchanged. A failed upload leaves a visible error and is never automatically resent. Install the matching protocol-15 companion with this source build and enter the one-time code from **Setup → Browser** in its popup.
 
-Opening the app reuses an idle ChatGPT tab for its initial observation when the browser is already present; showing the window again does not refresh a ready catalog or open Chrome. Explicit model reloads also reuse suitable tabs. A pending operation keeps its selected tab through settings navigation and extension-worker suspension. A slow page or missing receipt never authorizes a second OS open.
+Opening the app can observe the connected browser; showing the window again does not refresh a ready catalog or launch a foreground browser. Model discovery and reload use only proven app-owned isolated tabs. A pending operation keeps its selected tab through settings navigation and extension-worker suspension. A slow page or missing receipt never authorizes another opening attempt.
 
 In **Chat settings → Browser & history**, enable **Browser only** to prevent automatic plugin-refresh and recovery operations from creating tabs. Existing eligible tabs can still be used; explicit new chats, workers and model reloads retain their normal behavior. Closing a helper does not restart the same operation every maintenance cycle. Connector refresh verifies the installed App ID and complete tool declarations, and clicks Refresh only after the app has durably claimed a changed schema.
 
@@ -225,9 +255,11 @@ In **Chat settings → Browser & history**, enable **Browser only** to prevent a
 - **Tools missing or stale after a permission change:** tool-schema changes schedule a connector refresh after a 20-second debounce. If it fails, refresh the custom app in ChatGPT; this is separate from reloading the companion extension.
 - **Extension says app not found:** recording or multi-agent mode must be on for the bridge to run. Then reopen the popup.
 - **Extension version mismatch:** reload the unpacked extension after every app update.
+- **`BACKGROUND_UNAVAILABLE`:** connect the matching companion and retry only a send explicitly marked safe to retry. The app will not bring your browser forward as a fallback.
+- **`FOREGROUND_CONTROL_REQUIRED`:** choose **Allow foreground control** on the exact live task in Ambient Work Mode if you want physical desktop access. This does not replace app or macOS permissions.
 - **`agents` says `UNIDENTIFIED_CALLER`:** use that conversation in the paired browser so the extension can observe its request id. The app will not guess identity from the active tab.
 - **`COMPACTION_IN_PROGRESS` in a chat:** that chat is being handed off. Let it write the brief; work continues in the replacement.
-- **OS warning about an unverified app:** expected for the unsigned beta. Verify `SHA256SUMS.txt` before overriding.
+- **Windows SmartScreen warning:** Windows installers are unsigned; verify `SHA256SUMS.txt` before deciding to install. Public macOS builds are Developer ID signed and notarized. If Gatekeeper rejects one, stop and check its checksum and signing/notarization status instead of bypassing the warning.
 - **Linux says secure credential storage is unavailable:** unlock GNOME Keyring or KWallet and restart the app.
 - **Tunnel unavailable:** point Advanced settings at an explicit `tunnel-client` or `cloudflared`, or use the bundled copy.
 

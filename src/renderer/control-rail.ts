@@ -177,13 +177,22 @@ function latestAgentAction(agent: AgentInfo, session: SessionSummary | undefined
 function projectAgents(input: ControlRailProjectionInput, now: number): ControlRailAgent[] {
   const selectedIsWorker = input.session?.origin?.kind === 'worker';
   const exactPrimeModel = selectedIsWorker ? null : exactSessionModel(input.session);
-  const brokerAgents = input.swarm?.agents ?? [];
+  const ownerSessionId = selectedIsWorker ? input.session?.origin?.fromSessionId : input.session?.id;
+  const prime = input.swarm?.agents.find(agent => agent.role === 'prime');
+  const ownsSwarm = selectedIsWorker
+    ? !!ownerSessionId && input.workerSessions.some(session => session.id === input.session?.id && session.origin?.fromSessionId === ownerSessionId) &&
+      input.swarm?.agents.some(agent => agent.role === 'worker' && agent.id === input.session?.origin?.agentId &&
+        !!agent.conversationId && agent.conversationId === input.session?.conversationId) === true
+    : !!prime?.conversationId && prime.conversationId === input.session?.conversationId;
+  const brokerAgents = ownsSwarm ? input.swarm?.agents ?? [] : [];
   const projected = brokerAgents.map((agent): ControlRailAgent => {
     const workerSession = agent.role === 'worker'
-      ? input.workerSessions.find(session => session.origin?.kind === 'worker' && session.origin.agentId === agent.id)
-      : input.session ?? undefined;
-    const model = agent.role === 'prime' ? exactPrimeModel?.model ?? null : agent.model;
-    const effort = agent.role === 'prime' ? exactPrimeModel?.reasoningEffort ?? null : agent.reasoningEffort;
+      ? input.workerSessions.find(session => session.origin?.kind === 'worker' && session.origin.agentId === agent.id &&
+        session.origin.fromSessionId === ownerSessionId && session.conversationId === agent.conversationId)
+      : selectedIsWorker ? undefined : input.session ?? undefined;
+    const confirmedWorker = exactSessionModel(workerSession ?? null);
+    const model = agent.role === 'prime' ? exactPrimeModel?.model ?? null : confirmedWorker?.model ?? null;
+    const effort = agent.role === 'prime' ? exactPrimeModel?.reasoningEffort ?? null : confirmedWorker?.reasoningEffort ?? null;
     return {
       id: agent.id,
       label: agent.label || agent.id,
@@ -432,7 +441,7 @@ export function projectControlRail(input: ControlRailProjectionInput): ControlRa
   const runState: ControlRailRunState = input.blocked || failedAgent ? 'BLOCKED'
     : input.working || activeWorkers > 0 ? 'RUNNING'
       : queue.length > 0 ? 'WAITING'
-        : input.session?.endedAt ? 'COMPLETE' : 'IDLE';
+        : input.session?.lastTurnOutcome === 'completed' ? 'COMPLETE' : 'IDLE';
   const facts: ControlRailFact[] = [
     { id: 'workers', label: 'Active workers', value: String(activeWorkers) },
     { id: 'queue', label: 'Queued inputs', value: String(queue.length) },
@@ -470,6 +479,7 @@ export interface ControlRailOptions {
   renderWorker: (events: SessionEvent[], id: string, current: () => boolean) => HTMLElement[];
   openMain: (id: string) => void;
   copyPath: (path: string) => Promise<boolean | null>;
+  beforeOpen?: () => void;
   actions: {
     newTask: () => void;
     commands: () => void;
@@ -566,7 +576,7 @@ export function createControlRail(options: ControlRailOptions) {
   brand.querySelector('strong')!.textContent = 'MALACHI OVERDRIVE'; brand.querySelector('span')!.textContent = 'CONTROL RAIL';
   const close = button('', 'i-x'); close.className = 'control-rail-close'; close.setAttribute('aria-label', 'Close Control Rail'); close.title = 'Close'; header.append(brand, close);
   const live = document.createElement('div'); live.className = 'control-rail-live';
-  const run = document.createElement('strong'); run.className = 'control-rail-run';
+  const run = document.createElement('strong'); run.className = 'control-rail-run'; run.setAttribute('role', 'status'); run.setAttribute('aria-live', 'polite'); run.setAttribute('aria-atomic', 'true');
   const transport = document.createElement('span'); transport.className = 'control-rail-transport';
   const conversation = document.createElement('span'); conversation.className = 'control-rail-conversation'; live.append(run, transport, conversation);
   const facts = document.createElement('div'); facts.className = 'control-rail-facts';
@@ -577,6 +587,7 @@ export function createControlRail(options: ControlRailOptions) {
   ] as const;
   for (const [label, iconId, action] of quickButtons) { const node = button(label, iconId); node.addEventListener('click', action); quick.append(node); }
   const scroller = document.createElement('div'); scroller.className = 'control-rail-scroll';
+  const deck = document.createElement('div'); deck.className = 'control-rail-deck'; deck.append(live, quick, facts, scroller);
   const sections = {
     outputs: section(scroller, 'outputs', 'OUTPUTS', true), agents: section(scroller, 'agents', 'AGENTS', true),
     activity: section(scroller, 'activity', 'ACTIVITY', true), files: section(scroller, 'files', 'FILES', false),
@@ -587,89 +598,64 @@ export function createControlRail(options: ControlRailOptions) {
   const inspectorHead = document.createElement('div'); inspectorHead.className = 'control-rail-inspector-head';
   const back = button('Back', 'i-chev'); const inspectorTitle = document.createElement('strong'); const openFull = button('Open full chat', 'i-out');
   inspectorHead.append(back, inspectorTitle, openFull); const inspectorBody = document.createElement('div'); inspectorBody.className = 'control-rail-inspector-body'; inspector.append(inspectorHead, inspectorBody);
-  const scrim = document.createElement('div'); scrim.className = 'control-rail-scrim'; scrim.hidden = true;
-  const ambient = document.createElement('aside'); ambient.className = 'ambient-edge'; ambient.setAttribute('aria-label', 'Background work');
-  const ambientMain = document.createElement('button'); ambientMain.type = 'button'; ambientMain.className = 'ambient-edge-main'; ambientMain.setAttribute('aria-expanded', 'false');
-  const ambientRing = document.createElement('span'); ambientRing.className = 'ambient-edge-ring'; ambientRing.append(makeIcon('i-bolt'));
-  const ambientState = document.createElement('span'); ambientState.className = 'ambient-edge-state';
-  const ambientTime = document.createElement('span'); ambientTime.className = 'ambient-edge-time';
-  ambientMain.append(ambientRing, ambientState, ambientTime);
-  const ambientNew = button('', 'i-plus'); ambientNew.className = 'ambient-edge-new'; ambientNew.setAttribute('aria-label', 'Start a new task'); ambientNew.title = 'New task'; ambientNew.addEventListener('click', options.actions.newTask);
-  ambient.append(ambientMain, ambientNew);
-
-  const peek = document.createElement('section'); peek.id = 'ambientEdgePeek'; peek.className = 'ambient-peek'; peek.hidden = true; peek.setAttribute('aria-label', 'Background work preview');
-  const peekHead = document.createElement('header'); peekHead.className = 'ambient-peek-head';
-  const peekHeading = document.createElement('div'); peekHeading.append(document.createElement('strong'), document.createElement('span'));
-  peekHeading.querySelector('strong')!.textContent = 'WORKING IN BACKGROUND'; peekHeading.querySelector('span')!.textContent = 'The page stays yours while MALACHI works.';
-  const peekClose = button('', 'i-x'); peekClose.className = 'ambient-peek-close'; peekClose.setAttribute('aria-label', 'Close background preview'); peekHead.append(peekHeading, peekClose);
-  const peekPreview = document.createElement('div'); peekPreview.className = 'ambient-peek-preview';
-  const peekGlyph = document.createElement('span'); peekGlyph.className = 'ambient-peek-glyph'; peekGlyph.append(makeIcon('i-pulse'));
-  const peekCopy = document.createElement('div'); const peekTitle = document.createElement('strong'); const peekAction = document.createElement('span'); peekCopy.append(peekTitle, peekAction); peekPreview.append(peekGlyph, peekCopy);
-  const peekFacts = document.createElement('div'); peekFacts.className = 'ambient-peek-facts';
-  const peekWorkers = document.createElement('span'); const peekOutputs = document.createElement('span'); peekFacts.append(peekWorkers, peekOutputs);
-  const peekActions = document.createElement('div'); peekActions.className = 'ambient-peek-actions';
-  const keepBackground = button('Keep in background', 'i-eye'); keepBackground.classList.add('ambient-peek-quiet');
-  const openWorkbench = button('Open workbench', 'i-out'); openWorkbench.classList.add('ambient-peek-primary'); peekActions.append(keepBackground, openWorkbench);
-  peek.append(peekHead, peekPreview, peekFacts, peekActions);
-
-  const completion = document.createElement('aside'); completion.className = 'ambient-complete'; completion.hidden = true; completion.setAttribute('role', 'status'); completion.setAttribute('aria-live', 'polite');
-  const completionIcon = document.createElement('span'); completionIcon.className = 'ambient-complete-icon'; completionIcon.append(makeIcon('i-bolt'));
-  const completionCopy = document.createElement('div'); const completionTitle = document.createElement('strong'); completionTitle.textContent = 'Work complete'; const completionDetail = document.createElement('span'); completionCopy.append(completionTitle, completionDetail);
-  const completionClose = button('', 'i-x'); completionClose.className = 'ambient-complete-close'; completionClose.setAttribute('aria-label', 'Dismiss completion'); completion.append(completionIcon, completionCopy, completionClose);
-
-  rail.append(resize, header, live, facts, quick, scroller, inspector); options.host.append(scrim, rail, peek, ambient, completion);
-  ambientMain.setAttribute('aria-controls', peek.id);
+  rail.append(resize, header, deck, inspector); options.host.append(rail);
 
   let snapshot: ControlRailSnapshot | null = null;
   let selectedWorker: string | null = null;
   let parentKey = '';
   let loadGeneration = 0;
-  let previousRunState: ControlRailRunState | null = null;
-  let completionTimer: ReturnType<typeof setTimeout> | null = null;
   const seenWorkers = new Map<string, number>();
   const workerUpdates = new Map<string, number>();
+  let pendingWorkerRefresh = false;
 
   function open(): void {
     if (!rail.hidden) return;
-    rail.hidden = false; scrim.hidden = false; options.host.classList.add('has-control-rail'); options.toggle.setAttribute('aria-expanded', 'true');
+    options.beforeOpen?.();
+    rail.hidden = false; options.host.classList.add('has-control-rail'); options.toggle.setAttribute('aria-expanded', 'true');
+    close.focus();
   }
   function hide(restoreFocus = false): void {
     if (rail.hidden) return;
-    rail.hidden = true; scrim.hidden = true; options.host.classList.remove('has-control-rail'); options.toggle.setAttribute('aria-expanded', 'false');
+    rail.hidden = true; options.host.classList.remove('has-control-rail'); options.toggle.setAttribute('aria-expanded', 'false');
     if (restoreFocus) options.toggle.focus();
-  }
-  function openPeek(): void {
-    if (!peek.hidden) return;
-    peek.hidden = false; ambientMain.setAttribute('aria-expanded', 'true'); options.host.classList.add('has-ambient-peek');
-  }
-  function hidePeek(restoreFocus = false): void {
-    if (peek.hidden) return;
-    peek.hidden = true; ambientMain.setAttribute('aria-expanded', 'false'); options.host.classList.remove('has-ambient-peek');
-    if (restoreFocus) ambientMain.focus();
-  }
-  function showCompletion(detail: string): void {
-    completionDetail.textContent = detail; completion.hidden = false;
-    if (completionTimer) clearTimeout(completionTimer);
-    completionTimer = setTimeout(() => { completion.hidden = true; completionTimer = null; }, 7000);
   }
   function focusSection(id: SectionId): void {
     open(); const target = sections[id].details; target.open = true; target.scrollIntoView({ block: 'nearest' });
   }
-  function showDeck(): void { selectedWorker = null; loadGeneration++; inspector.hidden = true; scroller.hidden = false; facts.hidden = false; quick.hidden = false; live.hidden = false; }
+  function showDeck(restoreFocus = false): void {
+    const sessionId = selectedWorker;
+    selectedWorker = null; pendingWorkerRefresh = false; loadGeneration++; inspector.hidden = true; deck.hidden = false;
+    if (!restoreFocus) return;
+    const row = [...sections.agents.body.querySelectorAll<HTMLButtonElement>('.control-rail-agent')]
+      .find(candidate => candidate.dataset.sessionId === sessionId);
+    (row ?? close).focus();
+  }
 
-  async function openWorker(id: string): Promise<void> {
+  async function openWorker(id: string, reveal = true): Promise<void> {
     const agent = snapshot?.agents.find(row => row.sessionId === id || row.id === id);
     const sessionId = agent?.sessionId ?? id;
     if (!sessionId) return;
-    open(); selectedWorker = sessionId; const generation = ++loadGeneration;
-    scroller.hidden = true; facts.hidden = true; quick.hidden = true; live.hidden = true; inspector.hidden = false;
-    inspectorTitle.textContent = agent?.label ?? 'Worker'; inspectorBody.replaceChildren(); inspectorBody.append(document.createTextNode('Loading recorded worker conversation…'));
-    if (agent) seenWorkers.set(agent.id, agent.updatedAt);
+    if (reveal) { open(); pendingWorkerRefresh = false; }
+    selectedWorker = sessionId; const generation = ++loadGeneration;
+    deck.hidden = true; inspector.hidden = false;
+    inspectorTitle.textContent = agent?.label ?? 'Worker';
+    if (reveal) { inspectorBody.replaceChildren(); inspectorBody.append(document.createTextNode('Loading recorded worker conversation…')); }
     const detail = await options.loadWorker(sessionId);
     if (!detail || generation !== loadGeneration || selectedWorker !== sessionId) return;
+    // Passive refreshes leave an interaction in the transcript untouched. Once
+    // focus leaves the transcript, the pending exact-worker refresh is applied.
+    if (!reveal && inspectorBody.contains(document.activeElement)) { pendingWorkerRefresh = true; return; }
     const top = inspectorBody.scrollTop;
     inspectorBody.replaceChildren(...options.renderWorker(detail.events, sessionId, () => generation === loadGeneration && selectedWorker === sessionId)); inspectorBody.scrollTop = top;
+    if (agent) seenWorkers.set(agent.id, agent.updatedAt);
   }
+
+  inspectorBody.addEventListener('focusout', () => {
+    Promise.resolve().then(() => {
+      if (!pendingWorkerRefresh || inspectorBody.contains(document.activeElement) || !selectedWorker) return;
+      const id = selectedWorker; pendingWorkerRefresh = false; void openWorker(id, false);
+    });
+  });
 
   function paintFacts(items: ControlRailFact[]): void {
     reconcile(facts, items, () => { const node = document.createElement('div'); node.className = 'control-rail-fact'; return node; }, (node, item) => {
@@ -684,22 +670,6 @@ export function createControlRail(options: ControlRailOptions) {
     transport.textContent = snapshot.transport; conversation.textContent = snapshot.conversation;
     paintFacts(snapshot.facts);
 
-    const active = snapshot.agents.find(agent => ['active', 'waking', 'invited'].includes(agent.state)) ?? snapshot.agents[0];
-    const latest = snapshot.activity[0];
-    const runtimeFrom = active?.activatedAt ?? active?.createdAt;
-    ambient.dataset.tone = stateTone(snapshot.runState);
-    ambientMain.setAttribute('aria-label', `${snapshot.runState.toLowerCase()}: ${active?.task || snapshot.conversation}`);
-    ambientState.textContent = snapshot.runState === 'RUNNING' ? 'LIVE' : snapshot.runState;
-    ambientTime.textContent = runtimeFrom && snapshot.runState === 'RUNNING' ? formatDuration(Math.max(0, Date.now() - runtimeFrom)) : '';
-    peekTitle.textContent = active?.task ? clip(active.task, 72) : snapshot.conversation;
-    peekAction.textContent = latest ? metadata([latest.title, latest.detail && clip(latest.detail, 84)]) : active?.lastAction ?? (snapshot.runState === 'RUNNING' ? 'Starting the next step…' : 'No active work');
-    peekWorkers.textContent = `${snapshot.agents.filter(agent => ['active', 'waking', 'invited'].includes(agent.state)).length} active`;
-    peekOutputs.textContent = `${snapshot.outputs.length} output${snapshot.outputs.length === 1 ? '' : 's'}`;
-    if (previousRunState && previousRunState !== 'COMPLETE' && snapshot.runState === 'COMPLETE') {
-      showCompletion(snapshot.outputs[0]?.title ? `${snapshot.outputs[0].title} is ready.` : `${snapshot.conversation} is ready.`);
-    }
-    previousRunState = snapshot.runState;
-
     sections.outputs.count.textContent = String(snapshot.outputs.length);
     reconcile(sections.outputs.body, snapshot.outputs, () => rowShell(), (row, item) => {
       updateStandardRow(row, item.title, metadata([item.status, item.type, item.worker, relativeTime(item.time)]), item.path ?? '', item.type.startsWith('image/') ? 'i-image' : 'i-folder', item.status === 'failed' ? 'bad' : 'quiet');
@@ -712,8 +682,9 @@ export function createControlRail(options: ControlRailOptions) {
       else if (item.updatedAt > prior) workerUpdates.set(item.id, item.updatedAt);
       const unread = item.updatedAt > (seenWorkers.get(item.id) ?? item.updatedAt);
       row.classList.toggle('has-new', unread); row.toggleAttribute('disabled', !item.sessionId || item.role === 'prime');
+      if (item.sessionId) row.dataset.sessionId = item.sessionId; else delete row.dataset.sessionId;
       const runtimeFrom = item.activatedAt ?? item.createdAt; const end = item.finishedAt ?? Date.now();
-      const model = item.model ?? (item.role === 'prime' ? 'Model not recorded' : 'Account default');
+      const model = item.model ?? 'Selection not confirmed';
       const meta = metadata([model, item.reasoningEffort ?? undefined, item.state, runtimeFrom ? formatDuration(Math.max(0, end - runtimeFrom)) : undefined, item.contextTokens ? `~${Math.round(item.contextTokens / 1000)}k ctx` : undefined]);
       updateStandardRow(row, item.label, meta, metadata([item.task && clip(item.task, 94), item.lastAction, unread ? 'New activity' : undefined]), 'i-bolt', stateTone(item.state));
       row.setAttribute('aria-label', item.sessionId && item.role === 'worker' ? `Inspect ${item.label}` : item.label);
@@ -765,40 +736,53 @@ export function createControlRail(options: ControlRailOptions) {
     });
 
     const nextParent = snapshot.scopeId;
-    if (parentKey && parentKey !== nextParent && selectedWorker) showDeck();
+    if (parentKey && parentKey !== nextParent && selectedWorker) showDeck(inspector.contains(document.activeElement));
     parentKey = nextParent;
     if (selectedWorker) {
       const worker = snapshot.agents.find(agent => agent.sessionId === selectedWorker);
-      if (!worker) showDeck();
-      else if (worker.updatedAt > (seenWorkers.get(worker.id) ?? 0)) void openWorker(selectedWorker);
+      if (worker && worker.updatedAt > (seenWorkers.get(worker.id) ?? 0)) {
+        if (inspectorBody.contains(document.activeElement)) pendingWorkerRefresh = true;
+        else void openWorker(selectedWorker, false);
+      }
     }
   }
 
   options.toggle.setAttribute('aria-controls', rail.id); options.toggle.setAttribute('aria-expanded', 'false');
-  options.toggle.addEventListener('click', () => rail.hidden ? open() : hide(true)); close.addEventListener('click', () => hide(true)); scrim.addEventListener('click', () => hide(true));
-  ambientMain.addEventListener('click', () => peek.hidden ? openPeek() : hidePeek(true)); peekClose.addEventListener('click', () => hidePeek(true)); keepBackground.addEventListener('click', () => hidePeek(true));
-  openWorkbench.addEventListener('click', () => { hidePeek(); open(); }); completionClose.addEventListener('click', () => { completion.hidden = true; if (completionTimer) clearTimeout(completionTimer); completionTimer = null; });
-  back.addEventListener('click', showDeck); openFull.addEventListener('click', () => { if (!selectedWorker) return; const id = selectedWorker; showDeck(); hide(); options.openMain(id); });
+  options.toggle.addEventListener('click', () => rail.hidden ? open() : hide(true)); close.addEventListener('click', () => hide(true));
+  back.addEventListener('click', () => showDeck(true)); openFull.addEventListener('click', () => { if (!selectedWorker) return; const id = selectedWorker; showDeck(); hide(); options.openMain(id); });
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && !peek.hidden && rail.hidden && !document.querySelector('dialog[open]')) {
-      event.preventDefault(); hidePeek(true); return;
-    }
     if (event.key === 'Escape' && !rail.hidden && !document.querySelector('dialog[open]')) {
       event.preventDefault();
-      if (selectedWorker) showDeck(); else hide(true);
+      if (selectedWorker) showDeck(true); else hide(true);
       return;
     }
     if (event.key.toLowerCase() !== 'o' || !event.shiftKey || !(event.metaKey || event.ctrlKey) || event.altKey) return;
     event.preventDefault(); rail.hidden ? open() : hide(true);
   });
-  resize.addEventListener('dblclick', () => options.host.style.removeProperty('--control-rail-width'));
+  const setRailWidth = (width: number) => {
+    const bounded = Math.max(360, Math.min(460, Math.round(width)));
+    options.host.style.setProperty('--control-rail-width', `${bounded}px`); resize.setAttribute('aria-valuenow', String(bounded));
+  };
+  const currentRailWidth = () => {
+    const stored = Number.parseFloat(options.host.style.getPropertyValue('--control-rail-width'));
+    return Number.isFinite(stored) ? stored : 392;
+  };
+  resize.setAttribute('aria-valuemin', '360'); resize.setAttribute('aria-valuemax', '460'); resize.setAttribute('aria-valuenow', '392');
+  resize.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === 'Home') setRailWidth(360);
+    else if (event.key === 'End') setRailWidth(460);
+    else setRailWidth(currentRailWidth() + (event.key === 'ArrowLeft' ? 16 : -16));
+  });
+  resize.addEventListener('dblclick', () => { options.host.style.removeProperty('--control-rail-width'); resize.setAttribute('aria-valuenow', '392'); });
   resize.addEventListener('pointerdown', event => {
     if (matchMedia('(max-width: 1050px)').matches) return;
-    event.preventDefault(); const startX = event.clientX; const start = rail.getBoundingClientRect().width;
-    const move = (next: PointerEvent) => { options.host.style.setProperty('--control-rail-width', `${Math.max(360, Math.min(460, start + startX - next.clientX))}px`); };
+    event.preventDefault(); const startX = event.clientX; const start = rail.getBoundingClientRect().width || currentRailWidth();
+    const move = (next: PointerEvent) => setRailWidth(start + startX - next.clientX);
     const stop = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop); options.host.classList.remove('is-resizing-control-rail'); };
     options.host.classList.add('is-resizing-control-rail'); window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop, { once: true });
   });
 
-  return { update: paint, open, hide, openPeek, hidePeek, openWorker, focusSection, isOpen: () => !rail.hidden, isPeekOpen: () => !peek.hidden };
+  return { update: paint, open, hide, openWorker, focusSection, isOpen: () => !rail.hidden };
 }

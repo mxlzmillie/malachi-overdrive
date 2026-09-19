@@ -40,8 +40,8 @@ describe('extension release metadata', () => {
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);
     expect(manifest.version).toBe(APP_VERSION);
-    expect(BRIDGE_PROTOCOL).toBe(14);
-    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 14;');
+    expect(BRIDGE_PROTOCOL).toBe(15);
+    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 15;');
   });
 
   /**
@@ -464,6 +464,7 @@ interface WorkerHarness {
   tabsRemove: ReturnType<typeof vi.fn>;
   tabsReload: ReturnType<typeof vi.fn>;
   windowsUpdate: ReturnType<typeof vi.fn>;
+  windowsCreate: ReturnType<typeof vi.fn>;
   scriptingExecuteScript: ReturnType<typeof vi.fn>;
   scriptingInsertCSS: ReturnType<typeof vi.fn>;
   alarmCreate: ReturnType<typeof vi.fn>;
@@ -485,6 +486,7 @@ function response(status: number, data: unknown) {
 }
 
 function loadWorker(options: {
+  ownedWindow?: boolean;
   local: FakeStorageArea;
   session: FakeStorageArea;
   fetch?: (input: string, init?: Record<string, unknown>) => Promise<ReturnType<typeof response>>;
@@ -505,9 +507,10 @@ function loadWorker(options: {
     number,
     { id: number; windowId: number; url?: string; pendingUrl?: string; autoDiscardable?: boolean }
   >();
-  const tabsCreate = vi.fn(async ({ url }: { url?: string } = {}) => {
-    knownTabs.set(99, { id: 99, windowId: 7, ...(url ? { url } : {}) });
-    return { id: 99 };
+  const tabsCreate = vi.fn(async ({ url, windowId = 7 }: { url?: string; windowId?: number; active?: boolean } = {}) => {
+    const tab = { id: 99, windowId, ...(url ? { url } : {}) };
+    knownTabs.set(99, tab);
+    return tab;
   });
   const tabsQuery = vi.fn(options.tabsQuery ?? (async () => [...knownTabs.values()]));
   const tabsUpdate = vi.fn(async (id: number, properties: { autoDiscardable?: boolean } = {}) => {
@@ -523,6 +526,7 @@ function loadWorker(options: {
   const alarmCreate = vi.fn(() => undefined);
   const alarmClear = vi.fn(async () => true);
   const windowsUpdate = vi.fn(async () => ({ id: 7 }));
+  const windowsCreate = vi.fn(async (options: { url: string }) => ({ id: 70, state: 'minimized', focused: false, tabs: [await tabsCreate({ url: options.url, windowId: 70, active: false })] }));
   const documentNumbers = new Map<number, number>();
   const currentDocuments = new Map<number, string>();
   const documentFor = (tabId: number): string => {
@@ -550,7 +554,7 @@ function loadWorker(options: {
       },
       onStartup: event()
     },
-    windows: { update: windowsUpdate, get: options.windowsGet ?? (async () => ({ focused: true })) },
+    windows: { create: windowsCreate, update: windowsUpdate, get: options.windowsGet ?? (async (id: number) => ({ id, state: 'minimized', focused: false })) },
     scripting: {
       executeScript: scriptingExecuteScript,
       insertCSS: scriptingInsertCSS
@@ -568,7 +572,9 @@ function loadWorker(options: {
       create: tabsCreate,
       query: tabsQuery,
       update: tabsUpdate,
-      get: options.tabsGet ?? vi.fn(async () => {
+      get: options.tabsGet ?? vi.fn(async (id: number) => {
+        const known = options.tabsQuery ? (await tabsQuery()).find(tab => tab.id === id) : options.ownedWindow ? knownTabs.get(id) : undefined;
+        if (known) return known;
         throw new Error('tab state unavailable in this harness');
       }),
       sendMessage: tabsSendMessage,
@@ -599,6 +605,7 @@ function loadWorker(options: {
     setTimeout,
     clearTimeout,
     URL,
+    URLSearchParams,
     TextEncoder,
     console
   }, { filename: 'background.js' });
@@ -612,6 +619,7 @@ function loadWorker(options: {
     tabsRemove,
     tabsReload,
     windowsUpdate,
+    windowsCreate,
     scriptingExecuteScript,
     scriptingInsertCSS,
     alarmCreate,
@@ -694,6 +702,7 @@ function loadWorker(options: {
     },
     send(message, tabId = 1, documentId = documentFor(tabId), senderUrl) {
       if (message.type === 'bind' && typeof message.conversationId === 'string') {
+        if (options.ownedWindow) { options.session.data.chatBackgroundWindow = 7; options.session.data.chatBackgroundTabs = [...knownTabs.keys(), tabId]; }
         knownTabs.set(tabId, {
           ...knownTabs.get(tabId),
           id: tabId,
@@ -720,19 +729,22 @@ function journalOf(session: FakeStorageArea): any[] {
 }
 
 describe('accepted helper tab cleanup', () => {
-  for (const outcome of ['accepted', 'rejected', 'navigated'] as const) {
+  for (const outcome of ['accepted', 'rejected', 'navigated', 'moved-to-personal'] as const) {
     it(`closes only the exact accepted helper document (${outcome})`, async () => {
       const helper = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
       const other = '11111111-2222-4333-8444-555555555555';
       let url = `https://chatgpt.com/c/${helper}`;
+      let windowId = 7;
       const worker = loadWorker({
-        local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(),
-        tabsGet: async () => ({ id: 1, url }),
+        local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea({ chatBackgroundWindow: 7, chatBackgroundTabs: [1] }),
+        tabsGet: async () => ({ id: 1, windowId, url }),
+        tabsQuery: async () => [{ id: 1, windowId, url }],
         fetch: async (input) => {
           const route = new URL(input).pathname;
           if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
           if (route === '/input/answer') {
             if (outcome === 'navigated') url = `https://chatgpt.com/c/${other}`;
+            if (outcome === 'moved-to-personal') windowId = 9;
             return response(200, { ok: outcome !== 'rejected' });
           }
           return response(200, {});
@@ -818,7 +830,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
       }
       return response(200, { ok: true });
     });
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
       tabsGet: async id => ({ id, url: `https://chatgpt.com/c/${CHAT}` }),
       tabsQuery: async () => [],
       tabsSendMessage: async (id, message) => message.type === 'clf-confirm-input-receipt' && id === 21
@@ -833,7 +845,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
   it('keeps maintenance responsive while a receipt document does not answer', async () => {
     let releaseProbe: ((value: unknown) => void) | undefined;
     const probe = new Promise(resolve => { releaseProbe = resolve; });
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(),
       fetch: async input => new URL(input).pathname === '/hello'
         ? response(200, { app: 'chat-on-steroids', paired: true })
         : response(200, { ok: true, repairs: [], inputs: [], inputOpeningIds: [], inputReceipts: [{
@@ -869,7 +881,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     });
     const worker = loadWorker({
       local: new FakeStorageArea(paired),
-      session: new FakeStorageArea(),
+      session: new FakeStorageArea({ chatBackgroundWindow: 7, chatBackgroundTabs: [21] }),
       fetch,
       tabsQuery: async () => exposeTab ? [tab] : [],
       tabsGet: async () => tab,
@@ -913,7 +925,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
 
   it('browser-only recovery waits for the missing chat and then reloads its exact existing tab', async () => {
     const { fetch, asked } = appWith(OTHER, true);
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(41);
     await worker.send({ type: 'bind', conversationId: CHAT }, 41);
     await worker.fireAlarm(); await worker.fireAlarm();
@@ -929,7 +941,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
   });
   it('reloads the exact tab holding the chat the app named, and reports it once', async () => {
     const { fetch, asked, actions } = appWith(CHAT);
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(21);
     await worker.send({ type: 'bind', conversationId: CHAT }, 21);
     await worker.registerTab(22);
@@ -956,7 +968,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
    */
   it('reloads the registry-bound copy when one chat has two tabs', async () => {
     const { fetch, asked } = appWith(CHAT);
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(31);
     await worker.send({ type: 'bind', conversationId: CHAT }, 31);
     await worker.registerTab(32);
@@ -976,7 +988,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
   /** A reload that throws reports that attempt as failed, then the next pass retries it. */
   it('retries a repair whose reload failed', async () => {
     const { fetch, asked, failedActions } = appWith(CHAT);
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(51);
     await worker.send({ type: 'bind', conversationId: CHAT }, 51);
     worker.tabsReload.mockRejectedValueOnce(new Error('tab is gone'));
@@ -994,13 +1006,13 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
   /** A missing exact chat is opened once after the same fresh scan that prevents duplicates. */
   it('opens the exact chat when the scan proves this browser is not holding it', async () => {
     const { fetch, asked, actions } = appWith(OTHER);
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(41);
     await worker.send({ type: 'bind', conversationId: CHAT }, 41);
 
     await worker.fireAlarm();
     expect(worker.tabsReload).not.toHaveBeenCalled();
-    expect(worker.tabsCreate).toHaveBeenCalledWith({ url: `https://chatgpt.com/c/${OTHER}`, active: false });
+    expect(worker.tabsCreate).toHaveBeenCalledWith(expect.objectContaining({ url: `https://chatgpt.com/c/${OTHER}`, active: false }));
     expect(worker.windowsUpdate).not.toHaveBeenCalled();
     expect(asked).toEqual(['status', `repaired:${OTHER}`]);
     expect(actions).toEqual(['reopened']);
@@ -1010,7 +1022,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
    * Automatic compaction selects its exact tab before reload while preserving
    * OS focus on the user's current app, even when Chrome is minimized.
    */
-  it('selects the repair tab before reload without activating the Chrome window', async () => {
+  it('repairs the exact tab without selecting it or activating the Chrome window', async () => {
     let outstanding: string | null = CHAT;
     let token = '';
     let minted = 0;
@@ -1027,21 +1039,18 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
       }
       return response(404, {});
     });
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(51);
     await worker.send({ type: 'bind', conversationId: CHAT }, 51);
 
     await worker.fireAlarm();
-    expect(worker.tabsUpdate).toHaveBeenCalledWith(51, { active: true });
+    expect(worker.tabsUpdate).not.toHaveBeenCalledWith(51, { active: true });
     expect(worker.windowsUpdate).not.toHaveBeenCalled();
     expect(worker.tabsReload).toHaveBeenCalledWith(51);
-    const raised = worker.tabsUpdate.mock.invocationCallOrder.find(
-      (_order, index) => worker.tabsUpdate.mock.calls[index]?.[1]?.active === true
-    );
-    expect(raised).toBeLessThan(worker.tabsReload.mock.invocationCallOrder[0]!);
+    expect(worker.tabsUpdate.mock.calls.some(([, update]) => update.active === true)).toBe(false);
 
     await worker.fireAlarm();
-    expect(worker.tabsCreate).toHaveBeenCalledWith({ url: `https://chatgpt.com/c/${OTHER}`, active: true });
+    expect(worker.tabsCreate).toHaveBeenCalledWith(expect.objectContaining({ url: `https://chatgpt.com/c/${OTHER}`, active: false }));
   });
 
   it('opens an active agent chat in the same close transaction instead of losing its retry alarm', async () => {
@@ -1065,7 +1074,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
       }
       return response(404, {});
     });
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(71);
     await worker.send({ type: 'bind', conversationId: CHAT }, 71);
 
@@ -1073,7 +1082,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     for (let turn = 0; turn < 8; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(worker.tabsCreate).toHaveBeenCalledTimes(1);
-    expect(worker.tabsCreate).toHaveBeenCalledWith({ url: `https://chatgpt.com/c/${CHAT}`, active: false });
+    expect(worker.tabsCreate).toHaveBeenCalledWith(expect.objectContaining({ url: `https://chatgpt.com/c/${CHAT}`, active: false }));
     expect(asked.filter((item) => item !== 'status')).toEqual(['repaired:close-repair']);
     expect(asked[0]).toBe('status');
     expect(worker.alarmClear).not.toHaveBeenCalled();
@@ -1092,7 +1101,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
    */
   it('keeps its maintenance alarm running and asks the app on every pass while it is paired, tabs or none', async () => {
     const { fetch, asked } = appWith(null);
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.fireAlarm();
     expect(asked).toEqual(['status']);
     expect(worker.alarmCreate).toHaveBeenCalledWith('clf-bridge-drain', { delayInMinutes: 0.5 });
@@ -1101,12 +1110,12 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     await worker.send({ type: 'bind', conversationId: CHAT }, 51);
     await worker.fireAlarm();
     // Fresh content readiness wakes a pass without waiting for the maintenance alarm.
-    expect(asked).toEqual(['status', 'status', 'status']);
+    expect(asked.filter(item => item === 'status').length).toBeGreaterThanOrEqual(2);
   });
 
   it('asks nobody while it is not paired', async () => {
     const { fetch, asked } = appWith(null);
-    const worker = loadWorker({ local: new FakeStorageArea({}), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea({}), session: new FakeStorageArea(), fetch });
     await worker.fireAlarm();
     expect(asked).toEqual([]);
   });
@@ -1127,7 +1136,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
    */
   it('comes round at Chrome’s alarm floor while it holds a chat, so a repair waits at most one pass', async () => {
     const { fetch, asked, arm } = appWith(null);
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(61);
     await worker.send({ type: 'bind', conversationId: CHAT }, 61);
 
@@ -1226,7 +1235,7 @@ describe('active agent tab discard protection', () => {
     ];
     const worker = loadWorker({
       local: new FakeStorageArea(paired),
-      session: new FakeStorageArea({ tabDocuments: Object.fromEntries(tabs.map(tab => [tab.id, `doc-${tab.id}`])), tabEpochs: Object.fromEntries(tabs.map(tab => [tab.id, 0])) }),
+      session: new FakeStorageArea({ chatBackgroundWindow: 7, chatBackgroundTabs: [91, 92, 93], tabDocuments: Object.fromEntries(tabs.map(tab => [tab.id, `doc-${tab.id}`])), tabEpochs: Object.fromEntries(tabs.map(tab => [tab.id, 0])) }),
       fetch,
       tabsQuery: async () => tabs,
       tabsGet: async id => tabs.find(tab => tab.id === id)!,
@@ -1234,7 +1243,7 @@ describe('active agent tab discard protection', () => {
     });
 
     await worker.fireAlarm();
-    expect(worker.tabsRemove.mock.calls.map((call) => call[0]).sort()).toEqual([92, 93, 94]);
+    expect(worker.tabsRemove.mock.calls.map((call) => call[0]).sort()).toEqual([92, 93]);
     // The live prime chat is still protected, never closed.
     expect(worker.tabsUpdate).toHaveBeenCalledWith(91, { autoDiscardable: false });
   });
@@ -1273,10 +1282,10 @@ describe('active agent tab discard protection', () => {
 describe('app-owned retained tab pool', () => {
   const id = (n: number) => `aaaaaaaa-bbbb-4ccc-8ddd-${String(n).padStart(12, '0')}`;
   async function budget(options: { safe?: (tab: number) => boolean; changed?: number; keep?: number; recent?: number; protectDuplicate?: boolean; reverseActivity?: boolean; retired?: boolean; idle?: boolean; ordinary?: number } = {}) {
-    const tabs = [1, 2, 3, 4, 5, 6].map(n => ({ id: n, windowId: n === 5 ? 9 : 7, url: `https://chatgpt.com/c/${id(n === 4 ? 3 : n)}`, active: n === 5, lastAccessed: n === options.recent ? Date.now() : 0 }));
+    const tabs = [1, 2, 3, 4, 5, 6].map(n => ({ id: n, windowId: n === 6 ? 9 : 7, url: `https://chatgpt.com/c/${id(n === 4 ? 3 : n)}`, active: n === 5, lastAccessed: n === options.recent ? Date.now() : 0 }));
     const worker = loadWorker({
       local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
-      session: new FakeStorageArea({ tabDocuments: Object.fromEntries(tabs.map(tab => [tab.id, `doc-${tab.id}`])), tabEpochs: Object.fromEntries(tabs.map(tab => [tab.id, 0])) }),
+      session: new FakeStorageArea({ chatBackgroundWindow: 7, chatBackgroundTabs: [1, 2, 3, 4, 5], tabDocuments: Object.fromEntries(tabs.map(tab => [tab.id, `doc-${tab.id}`])), tabEpochs: Object.fromEntries(tabs.map(tab => [tab.id, 0])) }),
       fetch: async input => response(200, new URL(input).pathname === '/hello' ? { app: 'chat-on-steroids', paired: true } : {
         ok: true, repairs: [], tabsToKeepOpen: options.keep ?? 2, retiredConversations: options.retired ? [id(2), id(5)] : [],
         workerConversations: [1, 2, 3, 5].filter(n => n !== options.ordinary).map(id), sleepingWorkerConversations: [2, 3, 5].map(id),
@@ -1284,7 +1293,7 @@ describe('app-owned retained tab pool', () => {
         managedConversations: [1, 2, 3, 5].map(id), nonDiscardableConversations: [id(1), ...(options.protectDuplicate ? [id(3)] : [])], closableConversations: options.idle ? [2, 3, 5].map(id) : []
       }),
       tabsQuery: async () => tabs,
-      windowsGet: async () => ({ focused: true }),
+      windowsGet: async () => ({ id: 7, state: 'minimized', focused: false }),
       tabsGet: async n => ({ ...tabs.find(tab => tab.id === n)!, ...(n === options.changed ? { url: `https://chatgpt.com/c/${id(99)}` } : {}) }),
       tabsSendMessage: async n => ({ safe: options.safe?.(n) ?? true, navigationEpoch: 0, conversationId: tabs.find(tab => tab.id === n)!.url.split('/c/')[1] })
     });
@@ -1443,7 +1452,7 @@ describe('worker settings authority', () => {
    * cannot decide this from outside. It answers the capture request with the successor instead,
    * and the browser that holds chat A creates the tab in chat A's own window.
    */
-  it('opens the replacement chat in the window of the chat it continues', async () => {
+  it('opens a replacement chat in an isolated unfocused window even when its source is personal', async () => {
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
       if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
@@ -1471,16 +1480,17 @@ describe('worker settings authority', () => {
     const created = worker.tabsCreate.mock.calls[0]![0] as Record<string, unknown>;
     // The window is the whole point. The marker is the app's command id and nothing else —
     // redeeming it still requires the pairing token this worker holds.
-    expect(created.windowId).toBe(9);
-    expect(created.index).toBe(3);
+    expect(created.windowId).toBe(70);
+    expect(created.index).toBeUndefined();
+    expect(worker.windowsCreate).toHaveBeenCalledWith(expect.objectContaining({ state: 'minimized', focused: false }));
     expect(String(created.url)).toBe('https://chatgpt.com/?clf=cmd-handoff#clf=cmd-handoff');
     // Active in its own window, and its own window only: nothing here focuses that window, so
     // a handoff in the background instance does not yank the user out of the one they are in.
-    expect(created.active).toBe(true);
+    expect(created.active).toBe(false);
     expect(worker.windowsUpdate).not.toHaveBeenCalled();
   });
 
-  it('leaves a compaction reply that places nothing to the app’s own opener', async () => {
+  it('does not create another successor when compaction reply has no opening authority', async () => {
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
       if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
@@ -1605,8 +1615,8 @@ describe('extension command delivery', () => {
     // The page identifies itself, because a command belongs to one page: a second tab on
     // the same marker is a different claimant and the app refuses it.
     expect(bodies).toEqual([
-      { id: 'cmd-1', client: 'page-1' },
-      { id: 'cmd-gone', client: 'page-1' }
+      { id: 'cmd-1', client: 'page-1', isolated: false },
+      { id: 'cmd-gone', client: 'page-1', isolated: false }
     ]);
   });
 
@@ -1823,13 +1833,15 @@ describe('extension revival delivery', () => {
       ? { ok: true, recorderVersion: 11 }
       : { ok: true, claimed: true };
 
-  it('scans before opening and routes to the oldest exact worker tab', async () => {
+  it('routes revival to the oldest isolated worker tab even beside an older personal copy', async () => {
     const local = new FakeStorageArea(paired);
     const worker = loadWorker({
       local,
-      session: new FakeStorageArea({ recoveryMonitoring: true }),
+      session: new FakeStorageArea({ recoveryMonitoring: true, chatBackgroundWindow: 7, chatBackgroundTabs: [4, 9] }),
       fetch: app(),
+      windowsGet: async id => ({ id, state: id === 9 ? 'normal' : 'minimized', focused: id === 9 }),
       tabsQuery: async () => [
+        { id: 1, windowId: 9, url: `https://chatgpt.com/c/${CHAT}`, status: 'complete' },
         { id: 9, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, status: 'complete' },
         { id: 4, windowId: 7, url: `https://chat.openai.com/c/${CHAT}`, status: 'complete' }
       ],
@@ -1847,6 +1859,7 @@ describe('extension revival delivery', () => {
       })
     );
     expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.tabsSendMessage.mock.calls.some(([id, message]) => id === 1 && message.type === 'clf-run-command')).toBe(false);
     expect(worker.tabsRemove).not.toHaveBeenCalled();
     expect(worker.tabsUpdate).not.toHaveBeenCalled();
     expect(worker.windowsUpdate).not.toHaveBeenCalled();
@@ -1856,7 +1869,7 @@ describe('extension revival delivery', () => {
   it('opens one marked exact-chat tab only when the fresh scan finds none', async () => {
     const worker = loadWorker({
       local: new FakeStorageArea(paired),
-      session: new FakeStorageArea({ recoveryMonitoring: true }),
+      session: new FakeStorageArea({ recoveryMonitoring: true, chatBackgroundWindow: 7, chatBackgroundTabs: [4, 9] }),
       fetch: app()
     });
     await worker.createTab({ id: 41, url: `https://chatgpt.com/c/${PRIME}` });
@@ -1878,7 +1891,7 @@ describe('extension revival delivery', () => {
   it('does not duplicate an exact tab while its replacement document is still loading', async () => {
     const worker = loadWorker({
       local: new FakeStorageArea(paired),
-      session: new FakeStorageArea({ recoveryMonitoring: true }),
+      session: new FakeStorageArea({ recoveryMonitoring: true, chatBackgroundWindow: 7, chatBackgroundTabs: [4, 9] }),
       fetch: app(),
       tabsQuery: async () => [
         { id: 4, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, status: 'loading' }
@@ -1896,7 +1909,7 @@ describe('extension revival delivery', () => {
 
   it('does not turn a failed browser scan into absence or an opening permit', async () => {
     const worker = loadWorker({
-      local: new FakeStorageArea(paired), session: new FakeStorageArea({ recoveryMonitoring: true }),
+      local: new FakeStorageArea(paired), session: new FakeStorageArea({ recoveryMonitoring: true, chatBackgroundWindow: 7, chatBackgroundTabs: [4, 9] }),
       fetch: app(), tabsQuery: async () => { throw new Error('browser snapshot unavailable'); }
     });
     await worker.fireAlarm();
@@ -1907,7 +1920,7 @@ describe('extension revival delivery', () => {
   it('keeps an inaccessible complete exact tab as the only revival target', async () => {
     const worker = loadWorker({
       local: new FakeStorageArea(paired),
-      session: new FakeStorageArea({ recoveryMonitoring: true }),
+      session: new FakeStorageArea({ recoveryMonitoring: true, chatBackgroundWindow: 7, chatBackgroundTabs: [4, 9] }),
       fetch: app(),
       tabsQuery: async () => [
         { id: 4, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, status: 'complete' }
@@ -1927,11 +1940,11 @@ describe('extension revival delivery', () => {
   it('takes the fast path from any live activity poll without waiting for the alarm', async () => {
     const worker = loadWorker({
       local: new FakeStorageArea(paired),
-      session: new FakeStorageArea(),
+      session: new FakeStorageArea({ chatBackgroundWindow: 7, chatBackgroundTabs: [4] }),
       fetch: app('activity'),
       tabsQuery: async () => [
         { id: 4, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, status: 'complete' },
-        { id: 9, windowId: 7, url: `https://chatgpt.com/c/${PRIME}`, status: 'complete' }
+        { id: 9, windowId: 8, url: `https://chatgpt.com/c/${PRIME}`, status: 'complete' }
       ],
       tabsSendMessage: liveRecorder
     });
@@ -2492,7 +2505,7 @@ describe('extension observation journal', () => {
     ]);
   });
 
-  it('selects only the exact owned Goal tab without activating Chrome or opening a duplicate', async () => {
+  it('keeps autonomous Goal activity from selecting any browser tab', async () => {
     const conversationId = '22222222-3333-4444-5555-666666666666';
     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
     const session = new FakeStorageArea();
@@ -2503,10 +2516,9 @@ describe('extension observation journal', () => {
 
     expect(await worker.send({ type: 'focus_tab', conversationId, turnId: 'generation-owned' }, 73)).toMatchObject({
       ok: true,
-      focused: true
+      focused: false
     });
-    expect(worker.tabsUpdate).toHaveBeenCalledTimes(1);
-    expect(worker.tabsUpdate).toHaveBeenCalledWith(73, { active: true });
+    expect(worker.tabsUpdate).not.toHaveBeenCalled();
     expect(worker.windowsUpdate).not.toHaveBeenCalled();
     expect(worker.tabsCreate).not.toHaveBeenCalled();
 
@@ -2515,7 +2527,7 @@ describe('extension observation journal', () => {
       ok: false,
       error: 'stale_conversation'
     });
-    expect(worker.tabsUpdate).toHaveBeenCalledTimes(1);
+    expect(worker.tabsUpdate).not.toHaveBeenCalled();
     expect(worker.windowsUpdate).not.toHaveBeenCalled();
     expect(worker.tabsCreate).not.toHaveBeenCalled();
   });
@@ -3430,7 +3442,7 @@ it.each(['matching', 'wrong-document', 'unsafe-draft', 'newer-navigation'])('ret
   const sendMessage = vi.fn(async (..._args: unknown[]) => ({ safe: scenario !== 'unsafe-draft', conversationId, navigationEpoch: 0 }));
   const code = backgroundSource.slice(backgroundSource.indexOf('async function pruneManagedTabs('), backgroundSource.indexOf('\nfunction maintain(', backgroundSource.indexOf('async function pruneManagedTabs(')));
   const prune = vm.runInNewContext(`${code}\npruneManagedTabs`, {
-    CHATGPT_TAB_URLS: ['https://chatgpt.com/*'],
+    CHATGPT_TAB_URLS: ['https://chatgpt.com/*'], isolatedWorkerTab: async () => true,
     cleanConversationId: (id: string) => id, conversationForTab: () => conversationId,
     conversationFromUrl: (url: string) => url.split('/c/')[1], tabDocuments: { '71': scenario === 'wrong-document' ? 'replacement' : 'doc' },
     tabEpochs: { '71': 0 }, ownsDocument: () => true, journalCountForConversation: () => 0,

@@ -8,24 +8,25 @@ const workflow = source.slice(source.indexOf('let pluginRefreshFlight = null;'),
 it('keeps one operation on its original tab after marker loss, worker restart, and user closure', async () => {
   const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
   const saved: Record<string, unknown> = {};
-  let tab: { id: number; url: string } | null = null;
-  const create = vi.fn(async (url: string) => (tab = { id: 8, url }));
+  let tab: { id: number; windowId: number; url: string } | null = null;
+  const create = vi.fn(async (url: string) => (tab = { id: 8, windowId: 80, url }));
   const update = vi.fn(async (_id: number, patch: { url: string }) => { if (tab) tab.url = patch.url; return tab; });
   const storage = { session: { get: async () => saved, set: async (next: object) => { Object.assign(saved, next); } } };
   const start = () => {
     const context = vm.createContext({ URL, setTimeout, clearTimeout, CHATGPT_TAB_URLS: ['https://chatgpt.com/*'], createChatTab: create,
+      isolatedWorkerTab: async (candidate: typeof tab) => !!candidate && candidate.id === 8 && candidate.windowId === 80,
       call: async () => ({ ok: true, data: { requests: [{ id, appId: null }] } }),
       chrome: { storage, tabs: { query: async () => tab ? [tab] : [], get: async () => { if (!tab) throw Error('closed'); return tab; }, update, sendMessage: async () => ({ ok: true }) } } });
     vm.runInContext(`${workflow}\nglobalThis.run = inspectRequestedPluginRefresh;`, context); return context;
   };
-  await start().run([{}], true);
+  await start().run([{}], false);
   expect(create).toHaveBeenCalledTimes(1);
   tab!.url = 'https://chatgpt.com/#settings/Plugins/plugin_asdk_app_synthetic';
-  await start().run([{}], true);
+  await start().run([{}], false);
   expect(create).toHaveBeenCalledTimes(1);
   expect(update).toHaveBeenCalledWith(8, { url: `https://chatgpt.com/?cos-plugin-refresh=${id}#settings/Plugins/plugin_asdk_app_synthetic` });
   tab = null;
-  await start().run([{}], true); await start().run([{}], true);
+  await start().run([{}], false); await start().run([{}], false);
   expect(create).toHaveBeenCalledTimes(1);
 });
 
@@ -35,7 +36,7 @@ it('does not create a plugin helper in browser-only mode', async () => {
     call: async () => ({ ok: true, data: { requests: [{ id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' }] } }),
     chrome: { storage: { session: { get: async () => ({}) } }, tabs: { query: async () => [] } } });
   vm.runInContext(`${workflow}\nglobalThis.run = inspectRequestedPluginRefresh;`, context);
-  await context.run([{}], true, true);
+  await context.run([{}], true);
   expect(create).not.toHaveBeenCalled();
 });
 
@@ -47,10 +48,10 @@ it('records browser creation failure before claim and retries the same obligatio
   const context = vm.createContext({ call, createChatTab, URL, setTimeout, clearTimeout,
     CHATGPT_TAB_URLS: ['https://chatgpt.com/*'], chrome: { storage: { session: { get: async () => ({}), set: async () => {} } }, tabs: { query: async () => [] } } });
   vm.runInContext(`${workflow}\nglobalThis.run = inspectRequestedPluginRefresh;`, context);
-  await context.run([{}], true);
+  await context.run([{}], false);
   const actions = call.mock.calls.map(([, init]) => JSON.parse(init.body));
   expect(actions).toEqual([{ action: 'pending' }, { action: 'fail', id: request.id, error: 'The background plugin refresh tab could not be created' }]);
-  await context.run([{}], true);
+  await context.run([{}], false);
   expect(createChatTab).toHaveBeenCalledTimes(2);
   expect(call.mock.calls.map(([, init]) => JSON.parse(init.body).action)).toEqual(['pending', 'fail', 'pending']);
 });

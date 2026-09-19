@@ -451,6 +451,7 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark' } = {}): Prom
       finishAction: $<HTMLSelectElement>('finishAction').value as 'notify' | 'goal',
       finishLeadMinutes: Number($<HTMLSelectElement>('finishLeadMinutes').value),
       backgroundChats: $<HTMLInputElement>('backgroundChats').checked,
+      ambientNotifications: $<HTMLInputElement>('ambientNotifications').checked,
       browserOnly: $<HTMLInputElement>('browserOnly').checked,
       autoRefreshPlugins: $<HTMLInputElement>('autoRefreshPlugins').checked,
       autoConnect: $<HTMLInputElement>('autoConnect').checked,
@@ -947,6 +948,7 @@ function apply(next: AppState): void {
   applyValue($<HTMLSelectElement>('finishAction'), config.ui.finishAction ?? 'notify', previousState?.config.ui.finishAction);
   applyValue($<HTMLSelectElement>('finishLeadMinutes'), String(config.ui.finishLeadMinutes ?? 5), String(previousState?.config.ui.finishLeadMinutes ?? 5));
   applyChecked($<HTMLInputElement>('backgroundChats'), config.ui.backgroundChats === true, previousState?.config.ui.backgroundChats);
+  applyChecked($<HTMLInputElement>('ambientNotifications'), config.ui.ambientNotifications !== false, previousState?.config.ui.ambientNotifications !== false);
   applyChecked($<HTMLInputElement>('browserOnly'), config.ui.browserOnly === true, previousState?.config.ui.browserOnly);
   applyChecked($<HTMLInputElement>('autoRefreshPlugins'), config.ui.autoRefreshPlugins === true, previousState?.config.ui.autoRefreshPlugins);
   $('startAtLoginRow').hidden = next.loginStartupAvailable !== true;

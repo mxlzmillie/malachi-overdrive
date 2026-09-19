@@ -23,6 +23,7 @@ vi.mock('../src/main/computer/index.js', () => ({
   DEFAULT_SCREENSHOT_WIDTH: 1280,
   MAX_SCREENSHOT_WIDTH: 4096,
   actAndCapture: computer.actAndCapture,
+  withDesktopAuthorization: (_authorize: unknown, work: () => unknown) => work(),
   activeWindow: vi.fn(),
   findUi: vi.fn(),
   getWindowState: vi.fn(),

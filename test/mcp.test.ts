@@ -39,6 +39,7 @@ import { DEFAULT_CAPABILITIES, type Capabilities, type Root } from '../src/share
 import type { ToolOutcome } from '../src/shared/session.js';
 import { emptyEvidence, noteExec, noteOutcome, runInCallContext, type CallContext } from '../src/main/mcp/call-context.js';
 import { observeRequestCorrelation } from '../src/main/session/correlation.js';
+import { grantForegroundTurn } from '../src/main/desktop-custody.js';
 import { resetBlockedChatsForTests, setChatBlocked } from '../src/main/session/blocked-chats.js';
 import {
   abortContinuation,
@@ -1573,6 +1574,34 @@ describe('capability gating', () => {
 });
 
 describe('desktop capabilities', () => {
+  /** Real request ownership and a local exact-turn handoff let these tests reach
+   * capability validation without relaxing the default background refusal. */
+  const foregroundComputer = async () => {
+    const requestId = `wfr_desktop_${randomBytes(12).toString('hex')}`;
+    const conversationId = `conv-${requestId}`;
+    const recorded = await createSession({ title: 'Foreground permission fixture', conversationId });
+    const startedAt = Date.now();
+    const turnId = `turn-${requestId}`;
+    await appendEvent(recorded.id, { time: startedAt, source: 'extension', kind: 'turn_start', turnId });
+    grantForegroundTurn(recorded.id, conversationId, turnId, startedAt);
+    expect(observeRequestCorrelation({ requestId, conversationId, sessionId: recorded.id,
+      messageId: `message-${requestId}`, tool: 'computer', observedAt: startedAt })).toBe('stored');
+    return async (args: Record<string, unknown>) => {
+      const reply = await rawPost(endpoint.urls.desktop,
+        JSON.stringify({ jsonrpc: '2.0', id: nextId++, method: 'tools/call', params: { name: 'computer', arguments: args } }),
+        { 'x-request-id': `${requestId}/att1` });
+      return { status: reply.status, body: decode(reply) };
+    };
+  };
+
+  it('refuses physical desktop access without a task-scoped foreground handoff', async () => {
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ control: true, clipboardRead: true });
+    const reply = await desktop('tools/call', { name: 'computer', arguments: { actions: [{ type: 'read_clipboard' }] } });
+    expect(failed(reply)).toBe(true);
+    expect(textOf(reply)).toContain('FOREGROUND_CONTROL_REQUIRED');
+  });
+
   it('advertises nothing until a desktop permission is turned on', async () => {
     ctx.readOnly = false;
     expect(toolNames(await desktop('tools/list'))).toEqual([]);
@@ -1606,18 +1635,13 @@ describe('desktop capabilities', () => {
     ctx.readOnly = false;
     ctx.caps = withCaps({ control: false, clipboardRead: true, clipboardWrite: false });
     expect(toolNames(await desktop('tools/list'))).toEqual(['computer']);
+    const grantedComputer = await foregroundComputer();
 
-    const clicked = await desktop('tools/call', {
-      name: 'computer',
-      arguments: { actions: [{ type: 'click', x: 5, y: 5 }] }
-    });
+    const clicked = await grantedComputer({ actions: [{ type: 'click', x: 5, y: 5 }] });
     expect(clicked.body.result?.isError).toBe(true);
     expect(textOf(clicked)).toContain('mouse and keyboard control is disabled');
 
-    const written = await desktop('tools/call', {
-      name: 'computer',
-      arguments: { actions: [{ type: 'write_clipboard', text: 'nope' }] }
-    });
+    const written = await grantedComputer({ actions: [{ type: 'write_clipboard', text: 'nope' }] });
     expect(written.body.result?.isError).toBe(true);
     expect(textOf(written)).toContain('Replace clipboard text permission');
   });
@@ -1689,6 +1713,7 @@ describe('desktop capabilities', () => {
   it('validates compact computer postconditions and keeps screen permission live', async () => {
     ctx.caps = withCaps({ control: true, screen: true });
     ctx.readOnly = false;
+    const grantedComputer = await foregroundComputer();
     const malformed = await desktop('tools/call', {
       name: 'computer',
       arguments: { actions: [{ type: 'wait', ms: 0 }], verify: { until: 'foreground' } }
@@ -1696,12 +1721,9 @@ describe('desktop capabilities', () => {
     expect(failed(malformed)).toBe(true);
 
     ctx.caps = withCaps({ control: true, screen: false });
-    const disabled = await desktop('tools/call', {
-      name: 'computer',
-      arguments: {
+    const disabled = await grantedComputer({
         actions: [{ type: 'wait', ms: 0 }],
         verify: { until: 'foreground', window: 123, timeout_ms: 0 }
-      }
     });
     expect(failed(disabled)).toBe(true);
     expect(textOf(disabled)).toContain('See the screen');

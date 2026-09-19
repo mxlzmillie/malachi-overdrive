@@ -566,6 +566,22 @@ export function pendingBrowserInputs(): Promise<Array<{ id: string; conversation
     return result;
   });
 }
+/** Isolation refusal is a pre-send outcome, never proof that an authorized Send did not happen. */
+export function refuseBrowserInputIsolation(id: string, owner: string, conversationId: string | null): Promise<boolean> {
+  return serial(async () => {
+    const current = await load();
+    const entry = current.find(row => row.id === id);
+    if (!entry || !['queued', 'browser'].includes(entry.state) || entry.sendAuthorizedAt !== undefined ||
+        (entry.state === 'browser' && (entry.owner !== owner || entry.requiresAuthorization !== true)) ||
+        await target(entry) !== conversationId) return false;
+    const error = 'BACKGROUND_UNAVAILABLE: this task has no isolated app window. Reconnect the browser companion before retrying.';
+    await commit(current.map(row => row === entry ? { ...row, state: 'failed', error } : row));
+    decisionWaiters.get(id)?.reject(new Error('BACKGROUND_UNAVAILABLE'));
+    decisionWaiters.delete(id);
+    return true;
+  });
+}
+
 export function claimBrowserInput(id: string, owner: string, conversationId: string | null, requiresAuthorization = false): Promise<InputEntry | null> {
   return serial(async () => {
     const current = await load();

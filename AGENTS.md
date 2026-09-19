@@ -307,6 +307,9 @@ src/main/config.ts            validated settings, migrations, defaults, read-onl
 src/main/platform.ts          host capability projection; Desktop exists only on Windows and macOS (ScreenCaptureKit floor 12.3, below the 13.0 app floor)
 src/main/connection.ts        MCP + tunnel lifecycle, per-surface publication & status
 src/main/ipc.ts               every renderer→main operation and main→renderer push
+src/main/ambient-work.ts      bounded activity projection, completion receipts, exact-task controls and recorded output resolution
+src/main/desktop-custody.ts   ephemeral explicit foreground grant for one session/conversation/turn
+src/shared/ambient-work.ts    data-only Ambient activity, task, control and output contracts
 src/preload/index.ts          the complete renderer-facing API allowlist
 src/main/secrets.ts           Electron safeStorage-backed secret storage
 src/main/logger.ts            redacted operational log: 500-entry ring + userData/app.log mirror (not the session store)
@@ -393,6 +396,8 @@ extension/popup.html/.css/.js extension status/reconnect UI only; no tool/sessio
 ── other ──────────────────────────────────────────────────────────────────
 src/renderer/main.ts          setup/settings/connection/activity UI
 src/renderer/chat.ts          session timeline, handoff, swarm UI
+src/renderer/ambient-work.ts  passive edge capsule, non-modal preview and completion feedback; no execution owner
+src/renderer/control-rail.ts  explicitly opened workbench, exact worker transcript projection
 src/renderer/dom.ts           shared text-only renderer DOM/icon/toast/IPC-result helpers; no app state or innerHTML
 src/main/computer/index.ts    Desktop action policy, frame/ref lifetimes, batching and postconditions
 src/main/computer/helper.ts   Windows PowerShell/Win32/UIA helper protocol; no model text in argv
@@ -442,6 +447,7 @@ durable or externally re-observable fact can reconstruct it.
 | real conversation lifetime in a tab | `extension/background.js` tab registry | `storage.session` | document reload/pagehide is not conversation close; tab removal/navigation away decides closure |
 | active agent tab discard policy | `agents.ts` live state projected by `bridge.ts`; applied by `extension/background.js` | exact conversation ids derived per `/status`; extension-owned tab ids in `storage.session` | active Prime and active/waking/detached Worker tabs are non-auto-discardable; sleeping/terminal chats restore only policy this extension changed |
 | browser document + navigation identity | `background.js` document/epoch registry + `content.js` epoch | browser-session state + per-document memory | stale documents/epochs may observe but may not mutate current conversation state |
+| isolated browser surface ownership | `background.js` owned window/tab proof | browser `storage.session`, surviving MV3 suspension but not full browser restart | conversation identity or a minimized window alone never grants physical ownership; unprovable restored surfaces fail `BACKGROUND_UNAVAILABLE`; only a still-authorized fresh durable opening intent can create a new isolated surface |
 | browser command intent | `bridge.ts` `CommandSpec` | durable `bridge-commands` snapshot | exactly three semantic intents: fresh worker, exact-chat revive, fresh resume; the spec owns identity, not a URL/tab/document |
 | browser command lease | `bridge.ts` command record | durable queued/leased phase including `claimedAt` + exact `owner`; restore preserves a valid leased owner | `/commands/redeem` is the arbitration cut; worker/revive are exclusive to that page owner. Resume alone may transfer a pre-dispatch lease to another destination document while its durable send checkpoint still proves nothing was dispatched |
 | irreversible browser command result | `background.js` command ACK outbox → `bridge.ts` command/receipt semantics | ACK outbox is mirrored to `storage.local` for browser-restart durability; app command/receipt state survives app restart | fresh worker/resume terminal ACK retires into a receipt. A revive `sent` ACK proves the user message crossed ChatGPT, but the command intentionally stays leased until exact worker liveness or the 30s revival deadline resolves broker state |
@@ -461,6 +467,9 @@ durable or externally re-observable fact can reconstruct it.
 | Goal terminal reply obligation | `goal.ts` reply ledger | durable, one row per conversation, TTL + cap | the recorder freezes whether a stable final reply still requires one Goal decision before page races/reloads can lose it |
 | Goal draft | `goal.ts` draft map | memory; tied to durable obligation | at most one draft per conversation/turn; browser client owns acknowledgement; only `ready` text may be typed and `no-reply` is a real terminal decision |
 | renderer authority | `ipc.ts` + preload allowlist | process lifetime | renderer never receives generic Node/invoke authority; async reads paint only when their selection/generation still matches |
+| Ambient activity | `ambient-work.ts` | bounded rebuildable evidence cache + monotonic pushed snapshot | queue, recorder, broker and exact conversation controls remain authoritative; no invented model, progress or completion |
+| Ambient completion feedback | `AmbientCompletionTracker` | durable `ambient-completion-receipts` | record a genuine completed transition once before publication; historical restoration is not a new completion |
+| native foreground grant | `desktop-custody.ts` | memory, exact session/conversation/turn and recorded turn start | local user action only; new turn/restart requires a new grant; explicit Stop revokes it; app and OS permissions still apply |
 | connection/tunnel generation | `connection.ts` + `tunnel/*` | process lifetime, re-observed from process/metrics | stale callbacks from replaced tunnels are ignored; `/readyz` + readable poll metrics establish runtime readiness, while a completed/fresh poll timestamp separately verifies external-link age and detects later loss |
 | child process environment | `env.ts` | rebuilt per child | Windows env names are case-insensitive; never write `PATH` by raw object indexing; preserve the inherited environment unless a narrow repair is proven |
 | Windows build-tool discovery | `toolchain.ts` | process memoization | fill missing/unreachable JAVA_HOME/GOROOT only; never override an explicit or already-reachable toolchain |
@@ -503,7 +512,7 @@ first?**
 | resumed first answer missed by Goal | `content.js::rememberResumeGoalPending()` / `bindResumeGoalTurn()` | `maybeRecoverResumeGoalTurn()` → exact single resume-user-turn + final/Fiber proof → ordinary `noteGoalTurn()`; synthetic `g-resume-<commandId>` is only a stable local turn id when no observed generation id exists |
 | worker lifecycle | `tools-core.ts` `agents` action dispatch | `agents.ts::stageSpawn()` / `stageMessages()` / `stageFinishAgent()` → `persistCriticalSwarmNow()` → staged commit/rollback → bridge worker/revive commands → `background.js::recoverDeferredRevivals()` → exact page liveness back into `agents.ts` |
 | browser command delivery | worker producers `bridge.ts::queueWorkerBootstrap()` / `queueWorkerRevival()`; **resume production** is bridge POST `/compact` after `continuation.ts::attachSummary()` → private `queueResumeCommand()` | durable command owner/lease → `/commands/redeem` / `/commands/ack` → `background.js::redeemCommand()` / `ackCommand()` → content send → receipt/recovery in `restoreCommands()`; exported `queueResume()` is a test/older-caller convenience wrapper, and private generic `queue()` is storage plumbing — neither is the semantic resume entrypoint |
-| which browser opens a fresh chat | `bridge.ts::offerPlacement()` / `pendingBrowserPlacement()` → `background.js::placeSuccessorChat()` | the `/compact` reply that produced the command carries `placement`, and chat A's own browser creates chat B in chat A's window; `pendingBrowserPlacement()` spends opening authority on handout, before hydration; no timer may issue a second OS open. `openFreshChatInBrowser()` handles a resume with no waiting browser collector |
+| which browser opens a fresh chat | `bridge.ts::offerPlacement()` / `pendingBrowserPlacement()` → `background.js::placeSuccessorChat()` | the connected companion creates an isolated inactive successor, including ordinary resume; handout spends opening authority before hydration; missing isolation or companion fails closed with no OS opener |
 | extension document/conversation identity | `background.js::authorizeDocument()` / `registerDocument()` / `ownsDocument()` | `noteTabConversation()` + `chatgpt-dom.js::conversationFromPath()` / `conversationId()`; React-only evidence begins at `fiber.js::scan()` |
 | page observation commit | bridge POST `/events` | exact lost-worker-ACK recovery + `noteAgentAlive()` → `recorder.ts::recordChatObservations()` → durable Goal reply obligation → browser-recovery activity → context ceiling → staged/durable worker final → HTTP 200 lets extension journal retire the batch |
 | Overwrite / native ChatGPT presentation | `content.js::renderStreams()` | `websiteRenderForTurn()` + `completeReplacementForTurn()` + `hasUnrepresentedFiberCall()` → `chatgpt-dom.js::replaceActivity()` / `hideProgress()`; exact Fiber/page identities decide whether local activity is complete enough to replace native activity, while ChatGPT always keeps answer/code/actions |
@@ -512,7 +521,7 @@ first?**
 | connector connect/disconnect/settings | `connection.ts::enqueueLifecycle()` | `connectImpl()` → Core MCP/tunnel → `startDesktopTunnel()`; settings enter `applySettingsImpl()`, ordinary stop enters `disconnectImpl()`, final stop enters `shutdownConnection()` |
 | tunnel health / restart | `tunnel/index.ts::startOpenAiTunnel()` | `ClientRun` → `routeObservation()` → single-owner `restart()`; `connection.ts` and `diagnostics.ts` consume this report rather than supervising the child |
 | app update | `update.ts::startUpdateChecks()` → `checkForUpdates()` | `runPass()` → `stagedArtifact()` (packaged installs only) → `download()` + SHA-256 publication → `applyStagedUpdate()` at ordered shutdown |
-| Chats “Open Chat” | IPC `sessions:openChat` | re-read session truth → `browser.ts::openInPreferredBrowser(chatUrl(id))`; preload `openSessionChat()` is the narrow renderer boundary and `renderer/chat.ts::sessionRow()` is presentation only |
+| Chats “Open Chat” | IPC `sessions:openChat` | re-read session truth → exact app-owned companion reveal + request/conversation ACK; preload `openSessionChat()` is the narrow renderer boundary and no replacement tab or OS fallback is authorized |
 
 When a row crosses files, keep following the **same identity** through the arrows. Do not jump to a
 later fallback/UI symptom merely because its function name contains the error the user saw.
@@ -1854,19 +1863,12 @@ receipts, continuation tokens and deadline timers become live together at the si
 cut near the end of `restoreCommands()`. If that recovery barrier fails, bridge startup closes the
 socket and retries from durable authority later rather than exposing half-restored command state.
 
-`browser.ts` prefers installed Chrome channels/Chromium because orchestration markers are useful
-only in a browser that can host the extension. It tries the next compatible executable if launch
-of an earlier candidate fails; `index.ts` uses the system default only as a last-resort warning
-path, not as proof the command can be redeemed.
-
-That default-browser fallback is **orchestration-only**. `bridge.ts::setBrowserOpener()` is the
-injection point; `index.ts` wires it to preferred Chromium first and Electron `shell.openExternal()`
-as the warning fallback for worker/resume URLs so the user at least sees the generated ChatGPT
-target when no compatible Chromium can be launched, with an explicit warning that command
-redemption requires the extension. Chats **Open Chat** does not use that fallback: IPC calls
-`openInPreferredBrowser()` directly and returns “Chrome or Chromium was not found” rather than
-opening an arbitrary default browser that cannot host the companion extension. Do not merge these
-policies merely because both currently call the same preferred-browser helper first.
+`browser.ts` remains a utility for explicit browser-opening UI actions, not a task-delivery fallback.
+Worker, revival and ordinary resume commands use only the authenticated companion's isolated
+placement authority. Compaction and recovery wake that existing companion; they cannot cold-start
+the OS browser. Plugin refresh helpers use the same background-only creation policy. Chats
+**Open Chat** requests an exact existing app-owned surface and waits for the companion ACK; it
+does not manufacture a replacement or fall back to a different browser when the surface is absent.
 
 ## 15. Compact & Resume — `session/continuation.ts`
 
@@ -2182,9 +2184,17 @@ Two minutes of inactivity permits retirement only for terminal non-revivable wor
 chats and cancelled dedicated work. A late-confirmed cancelled desktop new-chat send may retire,
 but a later delivered follow-up supersedes that cancellation. Superseded sources and redundant
 document copies remain separately eligible. Fresh document, journal, draft and generation checks
-still gate every close. New owned windows use at most 45% of the work area, capped at 800×600,
-then minimize without a geometry update. Existing background windows are reused without changing
-their state or geometry; a temporary planner stays until its replacement is established.
+still gate every close. Task windows are created already minimized, without a foreground-create
+or create-then-minimize fallback. If the browser cannot supply an isolated background surface,
+delivery fails with `BACKGROUND_UNAVAILABLE`; it never opens an OS browser as a substitute.
+Existing owned background windows are reused without changing their state or geometry; a
+temporary planner stays until its replacement is established. Desktop input claims and worker
+command redemptions require the authenticated companion's current `isolated: true` proof.
+MV3 suspension preserves same-browser-session ownership proof. A full browser restart does not:
+never adopt a restored minimized window just because it contains an app conversation. If physical
+window/tab ownership cannot be proven, return `BACKGROUND_UNAVAILABLE` and retain task history;
+do not declare completion, replay a send or silently open a replacement. Only a fresh durable
+opening intent whose send checkpoints still authorize creation may create a new isolated tab.
 Model discovery retains its elected empty helper and transfers that exact tab to the first
 authored input after fresh empty-document proof. The old discovery owner records that handout,
 so a user-closed or navigated helper cannot regain opening authority. Browser process count is
@@ -2686,11 +2696,35 @@ Captured ChatGPT HTML is untrusted: `chat.ts::renderedMessage()` allowlists sema
 strips attributes, drops executable/form/embed content and non-safe link schemes.
 Tests: `ipc.test.ts`, `renderer-html.test.ts`, `renderer-layout.test.ts`, `renderer-state.test.ts`, `renderer-timeline.test.ts` (compaction card, stable rows).
 
+**Ambient Work Mode.** `ambient-work.ts` projects bounded existing queue/recorder/broker evidence
+on change notifications, with no polling timer or parallel execution state machine. It omits raw
+tool arguments/results, private reasoning, absolute paths and credentials from activity summaries.
+Models/efforts remain confirmed, requested or unknown; numeric progress is absent without a real
+total. A completed turn with unfinished child work is not completed work. Receipts commit before
+completion feedback is pushed, and restored history does not notify again. Output opening accepts
+only an exact recorded event/index and resolves the current approved root before revealing the file.
+
+`controlAmbientWork()` validates session/conversation/turn against the existing control owner;
+Pause/Resume change only existing Goal/Loop follow-ups, Stop targets that exact live turn, and Retry
+requires a provably unsent exact input. Re-check identity after awaited reads. **Allow foreground
+control** is an explicit handoff for that turn: both Desktop tools, including observation and
+clipboard reads, otherwise refuse model calls with `FOREGROUND_CONTROL_REQUIRED`. This is native
+Desktop API enforcement, not an OS sandbox for `exec_command` or external plugins; model instructions
+also forbid escaping the background policy through scripts, shell commands or other tools.
+
+`renderer/ambient-work.ts` owns presentation only. Passive updates never open the preview/workbench
+or move focus; closing them does not cancel a task. Preserve selected identity and focus across
+updates, fence asynchronous status by selection epoch and exact turn, and defer notice expiry while
+its controls have focus. `control-rail.ts` joins workers by exact conversation and broker identity,
+never a reusable worker label alone. Tests: `ambient-work`, `ambient-desktop`, `desktop-custody`,
+`renderer-ambient-work`, `renderer-control-rail`, `background-window`, `desktop-input-maintenance`.
+
 Chats **Open Chat** is another example of the same narrow boundary. `renderer/chat.ts::sessionRow()`
 draws the action only when the current session summary carries a `conversationId`, but the renderer
 does not construct or trust a ChatGPT URL. Preload exposes only `openSessionChat(id)`; IPC
 `sessions:openChat` re-reads that session from the store, validates the stored conversation id, then
-calls `browser.ts::openInPreferredBrowser(chatUrl(id))`. An Unattributed/no-conversation session is
+uses an explicit one-shot companion reveal request for an app-owned chat, confirmed by exact request/conversation ACK;
+there is no OS-open fallback. An Unattributed/no-conversation session is
 therefore not openable, and a renderer-supplied session id can never smuggle an arbitrary URL into
 the browser opener.
 
@@ -3067,7 +3101,7 @@ or event sequence end to end. Keep any security-sensitive reproduction material 
 
 ## 20. Packaging and release — `electron-builder.yml`
 
-App id `com.chatonsteroids.app`, product `Chat On Steroids`. Releases build six native
+App id `com.chatonsteroids.app`, product `MALACHI OVERDRIVE`. Releases build six native
 platform/architecture jobs: Windows x64/ARM64 NSIS, macOS x64/ARM64 DMG+ZIP, and Linux
 x64/ARM64 AppImage+DEB. Windows stays per-user-capable, `asInvoker`, no forced elevation.
 
@@ -3120,7 +3154,7 @@ The `scripts/` directory is build/release code, not an unstructured bag of helpe
 | `fetch-ripgrep.mjs` | same pattern for pinned rg; Linux deliberately uses portable musl upstream builds |
 | `prepare-packaging-native.mjs` | materialize target Sharp packages from **package-lock URL+integrity**, then stage verified target node-pty/tree-sitter/Sharp trees without allowing host leftovers to win |
 | `smoke-packaged-runtime.mjs` | prove an unpacked artifact contains the exact extension, licenses, tunnel, rg and target native modules and that the packaged executable/runtime can actually load/use them |
-| `smoke-macos-bundle.mjs` + `macos-audit-utils.mjs` | native macOS bundle audit: Info.plist contract, thin Mach-O arch, deployment floors, executable bits and current unsigned/no-trust-bearing-signature policy; helper safely handles parenthesized Electron helper names with classic `otool` |
+| `smoke-macos-bundle.mjs` + `macos-audit-utils.mjs` | native macOS bundle audit: Info.plist, thin Mach-O arch, deployment floors, executable bits and strict signature envelope; release mode requires the pinned Developer ID team and a valid stapled Apple notarization ticket on unpacked and archived apps, while local development retains ad-hoc mode |
 | `smoke-macos-gui.mjs` | launch the packaged macOS GUI, require app/window/renderer-ready evidence plus a minimum survival window, then terminate it cleanly; package existence alone is not a GUI startup proof |
 | `make-icon.mjs` | reproducibly derive app/runtime/extension icon sizes from the one controlled artwork PNG without introducing an image-build dependency |
 | `verify-public-history.mjs` | release-line privacy/provenance gate over reachable HEAD history/tags plus staged/current identity; PR synthetic merge identity is excluded because it can never enter public history, and commits already reachable from `origin/main` are exempt because they have already entered it — a forge-written merge commit no local hook ever saw must not strand every later push, and unpublishing one is a deliberate public rewrite rather than a hook's call |

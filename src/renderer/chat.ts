@@ -6,6 +6,7 @@ import { applyChatModels, applyComposerSessionModel, chatModelCatalogSummary, in
 import { marked, Marked } from 'marked';
 import { safeExternalLink } from '../shared/external-link.js';
 import { createControlRail, projectControlRail } from './control-rail.js';
+import { createAmbientWork } from './ambient-work.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { toolResultText } from './tool-result.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
@@ -129,6 +130,7 @@ function draftKey(): string { return selectedId ?? (selectedProjectId ? `project
 let selectionGeneration = 0;
 let pendingNewInput: { id: string; generation: number } | null = null;
 let controlRail: ReturnType<typeof createControlRail> | null = null;
+let ambientWork: ReturnType<typeof createAmbientWork> | null = null;
 const expandedWorkers = new Set<string>();
 const inputDrafts = new Map<string, string>();
 const imageDrafts = new Map<string, Array<InputImage | InputAttachment>>();
@@ -2784,7 +2786,7 @@ const CHAT_INPUTS = [
   'chatBrowser',
   'goalIncludeToolCalls',
   'planBackend',
-  'finishTool', 'finishAction', 'finishLeadMinutes', 'workerModel', 'workerReasoning', 'backgroundChats', 'browserOnly', 'autoRefreshPlugins',
+  'finishTool', 'finishAction', 'finishLeadMinutes', 'workerModel', 'workerReasoning', 'backgroundChats', 'ambientNotifications', 'browserOnly', 'autoRefreshPlugins',
   'goalBackend',
   'loopBackend',
   'helperModel', 'helperReasoning',
@@ -3485,6 +3487,7 @@ export function initChat(next: Deps): void {
   controlRail = createControlRail({
     host: document.querySelector<HTMLElement>('.app')!,
     toggle: $<HTMLButtonElement>('controlRailToggle'),
+    beforeOpen: () => ambientWork?.hide(),
     loadWorker: id => run(api.getSession(id, { limit: 160 })),
     openMain: id => { pendingNewInput = null; selectSession(id); },
     copyPath: path => run(api.writeClipboard(path)),
@@ -3513,6 +3516,20 @@ export function initChat(next: Deps): void {
       return groupToolRows(rows, `rail:${id}`, railToolGroups);
     }
   });
+  ambientWork = createAmbientWork({
+    host: document.querySelector<HTMLElement>('.app')!,
+    beforePreview: () => controlRail?.hide(),
+    control: request => run(api.controlAmbientWork(request)),
+    output: output => run(api.openAmbientOutput({ sessionId: output.sessionId, eventSeq: output.eventSeq, outputIndex: output.outputIndex })),
+    chat: id => run(api.openSessionChat(id)),
+    workbench: task => {
+      deps.navigate?.('chat');
+      if (task?.sessionId) { pendingNewInput = null; selectSession(task.sessionId); }
+      controlRail?.open();
+    }
+  });
+  api.onAmbientWorkChanged(snapshot => ambientWork?.update(snapshot));
+  void run(api.getAmbientWork()).then(snapshot => { if (snapshot) ambientWork?.update(snapshot); });
   updateControlRail();
   initChatModels(() => {
     const config = deps.state()?.config;

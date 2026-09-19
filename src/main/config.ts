@@ -290,6 +290,7 @@ const configSchema = z.object({
     binaryPath: z.string().max(4096)
   }),
   ui: z.object({
+    ambientNotifications: z.boolean().optional().default(true),
     chatBrowser: z.enum(CHAT_BROWSERS).optional().default('chrome'),
     developerMode: z.boolean().optional(),
     finishTool: z.boolean().optional(),

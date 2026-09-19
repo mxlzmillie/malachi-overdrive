@@ -2,10 +2,9 @@ import { conversationProgress } from './session/progress.js';
 import { pendingChatModelRequest, observeChatModels } from './chat-models.js';
 import { isProModel } from '../shared/chat-models.js';
 import type { SessionSummary } from '../shared/session.js';
-import { publishBrowserDecision, authorizeBrowserInput, sessionInputPolicy } from './session/input.js';
+import { publishBrowserDecision, authorizeBrowserInput, sessionInputPolicy, refuseBrowserInputIsolation } from './session/input.js';
 import { pluginRefreshPublications, pendingPluginRefreshes, claimPluginRefresh, requireManualPluginRefresh, completePluginRefresh, failPluginRefresh } from './plugin-refresh.js';
 import { attachBrowserWake, wakeBrowserWork } from './browser-wake.js';
-import { wakeBrowserUrl } from './browser-startup.js';
 let browserWake: ReturnType<typeof attachBrowserWake> | null = null;
 import { browserWindowBounds, currentBrowserWorkArea } from './browser-window-layout.js';
 export { setBrowserWorkArea } from './browser-window-layout.js';
@@ -105,7 +104,6 @@ import {
   primeForOwnedConversation,
   agentForOwnedConversation,
   isWorkerConversation,
-  isModelSlug,
   bindConversation,
   claimWorkerRevival,
   closableWorkerConversations,
@@ -595,6 +593,35 @@ export function browserPresent(): boolean {
 
 /** Recent HTTP presence cannot prove that an explicit desktop send can wake Chrome now. */
 export function browserWakeConnected(): boolean { return browserWake?.connected() === true; }
+
+const workerChatReveals = new Map<string, { conversationId: string; handed: boolean; finish: (ok: boolean) => void }>();
+async function appOwnsConversation(conversationId: string): Promise<boolean> {
+  if (isWorkerConversation(conversationId)) return true;
+  if ((await listUsageSessions()).some(row => row.conversationId === conversationId && row.origin)) return true;
+  return (await listInputs()).some(row => row.conversationId === conversationId && row.deliveredAt !== undefined);
+}
+/** User-only reveal authority: one exact existing app chat, never a replacement tab. */
+export async function requestWorkerChatReveal(conversationId: string): Promise<boolean> {
+  if (!await appOwnsConversation(conversationId) || !browserWakeConnected())
+    throw new Error('BACKGROUND_UNAVAILABLE: this task needs its app-owned browser chat and connected companion.');
+  if ([...workerChatReveals.values()].some(row => row.conversationId === conversationId)) return false;
+  const id = randomBytes(16).toString('hex');
+  return new Promise<boolean>((resolve, reject) => {
+    const timer = setTimeout(() => { workerChatReveals.delete(id); reject(new Error('The browser could not confirm opening this exact task chat. No replacement was opened.')); }, 10_000);
+    timer.unref?.();
+    workerChatReveals.set(id, { conversationId, handed: false, finish: ok => {
+      clearTimeout(timer); workerChatReveals.delete(id);
+      if (ok) resolve(true); else reject(new Error('This task chat is unavailable in its isolated browser window. No replacement was opened.'));
+    } });
+    wakeBrowserWork();
+  });
+}
+function takeWorkerChatReveal(): { id: string; conversationId: string } | null {
+  const pending = [...workerChatReveals.entries()].find(([, row]) => !row.handed);
+  if (!pending) return null;
+  const [id, row] = pending; row.handed = true;
+  return { id, conversationId: row.conversationId };
+}
 
 /**
  * Records one authenticated browser sighting and schedules the inverse state transition.
@@ -1093,15 +1120,16 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
     blocked, job: resumeJobFor(sessionId) };
 }
 /** Stop is a request against one exact live turn, never a predicted final boundary. */
-export async function stopSessionTurn(sessionId: string, expectedTurnId: string): Promise<SessionControlsView> {
+export async function stopSessionTurn(sessionId: string, expectedTurnId: string, expectedConversationId?: string): Promise<SessionControlsView> {
   const id = await controlledConversation(sessionId);
+  if (expectedConversationId !== undefined && expectedConversationId !== id) throw new Error('conversation_changed');
   const assertCurrent = async () => {
     const latest = await getSession(sessionId);
     if (latest?.conversationId !== id || latest.activeTurnId !== expectedTurnId || !expectedTurnId ||
         await conversationWasSuperseded(id) || (await sessionControlsFor(sessionId)).activeTurnId !== expectedTurnId) throw new Error('active_turn_changed');
   };
   await assertCurrent();
-  await setSessionAutomation(sessionId, 'off');
+  await setSessionAutomation(sessionId, 'off', id);
   await assertCurrent();
   if (continuationForSession(sessionId)) { await cancelResumeNow(sessionId); await assertCurrent(); }
   const command = queue({ type: 'stop', sessionId, conversationId: id, turnId: expectedTurnId });
@@ -1175,8 +1203,9 @@ export async function setSessionObjective(sessionId: string, text: string, mode:
   });
   return sessionControlsFor(sessionId);
 }
-export async function setSessionAutomation(sessionId: string, automation: SessionControlsView['automation']): Promise<SessionControlsView> {
+export async function setSessionAutomation(sessionId: string, automation: SessionControlsView['automation'], expectedConversationId?: string): Promise<SessionControlsView> {
   const id = await controlledConversation(sessionId);
+  if (expectedConversationId !== undefined && id !== expectedConversationId) throw new Error('conversation_changed');
   if (automation !== 'off' && goalBlockReason(id)) throw new Error(goalWorkerChat(id) ? 'worker_goal_disabled' : 'chat_blocked');
   const mode = automation === 'off' ? goalSwitchFor(id).mode : automation;
   // The existing reply setter retires drafts and durably closes the pickup for Off.
@@ -1203,14 +1232,9 @@ async function fileCompactionTicket(sessionId: string, id: string, automatic = f
   return { opened, started: !existing };
 }
 export async function compactSession(sessionId: string): Promise<SessionControlsView> {
-  const { opened } = await fileCompactionTicket(sessionId, await controlledConversation(sessionId));
-  const lifecycle = bridgeLifecycleEpoch;
-  await wakeBrowserUrl(chatUrl(opened.from), true, getConfig().ui.backgroundChats === true, {
-    current: () => bridgeLifecycleEpoch === lifecycle && !bridgeShutdownRequested &&
-      !isChatBlocked(opened.from) && !stopRequestedFor(opened.from) &&
-      continuationForSession(sessionId)?.token === opened.token &&
-      continuationForSession(sessionId)?.state === 'awaiting-summary'
-  });
+  if (!browserWakeConnected()) throw new Error('BACKGROUND_UNAVAILABLE: reconnect the browser companion before compacting this task.');
+  await fileCompactionTicket(sessionId, await controlledConversation(sessionId));
+  wakeBrowserWork();
   return sessionControlsFor(sessionId);
 }
 export async function cancelSessionCompaction(sessionId: string): Promise<SessionControlsView> {
@@ -1468,7 +1492,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (repaired) {
       await confirmRepair(repaired.slice(0, 64), action);
     } else if (repairFailed) {
-      await failRepairAttempt(repairFailed.slice(0, 64), action);
+      await failRepairAttempt(repairFailed.slice(0, 64), action, url.searchParams.get('repairError') === 'BACKGROUND_UNAVAILABLE');
     }
     const revival = pendingBrowserRevival();
     const inputRows = await listInputs();
@@ -1490,7 +1514,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           .map(row => ({ id: row.id, owner: row.owner,
             digest: createHash('sha256').update(row.deliveryText!.replace(/\s+/g, '')).digest('hex') })),
         inputOpeningIds: inputRows.filter(row => !['sent', 'failed', 'cancelled'].includes(row.state)).map(row => row.id),
-        inputs: [...(await pendingBrowserInputs()).filter(input => !input.conversationId || runningToolCalls(input.conversationId) === 0),
+        inputs: [...(await pendingBrowserInputs()).filter(input => !input.conversationId || runningToolCalls(input.conversationId) === 0)
+          .map(input => ({ ...input, isolated: true })),
           ...inputRows.filter(row => row.lifetime === 'temporary-planner' && ['sent', 'cancelled', 'failed'].includes(row.state))
             .map(row => ({ id: row.id, owner: row.owner, lifetime: row.lifetime, close: true,
               retire: true,
@@ -1501,8 +1526,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         browserWorkArea: currentBrowserWorkArea(),
         browserWindowBounds: browserWindowBounds(),
         commands: commands.length,
+        isolatedCommands: commands.filter(command => command.spec.type !== 'stop').map(command => command.id),
         revival,
         placement: pendingBrowserPlacement(null),
+        chatReveal: takeWorkerChatReveal(),
         // A failure report closes this request. Reissuing the repair in the same response would
         // replace the visible failure with "Trying" before a renderer could ever observe it.
         repairs: repairFailed ? [] : await takePendingRepairs(),
@@ -1511,6 +1538,29 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       },
       origin
     );
+  }
+
+  if (route === '/browser/worker-reveal' && req.method === 'POST') {
+    const body = await readBody(req) as { id?: string; conversationId?: string; ok?: boolean };
+    const pending = typeof body?.id === 'string' ? workerChatReveals.get(body.id) : undefined;
+    const accepted = pending?.handed === true && pending.conversationId === body.conversationId;
+    if (accepted) pending.finish(body.ok === true && await appOwnsConversation(pending.conversationId));
+    return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
+  }
+  if (route === '/commands/background-failed' && req.method === 'POST') {
+    const body = await readBody(req) as { id?: string };
+    const command = commands.find(entry => entry.id === body?.id && entry.owner === null &&
+      entry.spec.type !== 'stop');
+    const accepted = command ? drop(command, 'BACKGROUND_UNAVAILABLE: the browser could not provide an isolated worker window. No foreground fallback was used.') : false;
+    return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
+  }
+  if (route === '/input/background-failed' && req.method === 'POST') {
+    const body = await readBody(req) as { id?: unknown; conversationId?: unknown };
+    const target = body?.conversationId === null ? null : conversationId(body?.conversationId);
+    if (typeof body?.id !== 'string' || (body.conversationId !== null && !target))
+      return json(res, 400, { error: 'invalid_input' }, origin);
+    const ok = await refuseBrowserInputIsolation(body.id, '', target);
+    return json(res, ok ? 200 : 409, { ok }, origin);
   }
 
   if (route === '/usage' && req.method === 'POST') {
@@ -1564,6 +1614,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     const target = body.conversationId === null ? null : conversationId(body.conversationId);
     if (body.conversationId !== null && !target) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    if (body.isolated !== true) {
+      await refuseBrowserInputIsolation(body.id, body.owner, target);
+      return json(res, 409, { error: 'BACKGROUND_UNAVAILABLE', input: null, ok: false }, origin);
+    }
     if (body.authorize === true) return json(res, 200, { ok: await authorizeBrowserInput(body.id, body.owner, target) }, origin);
     if (target && runningToolCalls(target) > 0) return json(res, 200, { input: null }, origin);
     const input = await claimBrowserInput(body.id, body.owner, target, body.requiresAuthorization === true);
@@ -2535,18 +2589,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         );
       }
       const command = queueResumeCommand(sessionId, token);
-      // This request is chat A's own page asking for the handoff it is in the middle of, so the
-      // reply below can hand it the successor to open. Delivery may hold the OS opener back for
-      // exactly as long as that is true — see offerPlacement.
-      placementCollector = id;
-      // The command's leased phase is a crash boundary: do not tell the page capture is fully
-      // accepted until the attempt we are about to open is durable. This also makes the HTTP
-      // response and the browser-open side effect deterministically ordered for callers.
-      try {
-        await deliver();
-      } finally {
-        placementCollector = null;
-      }
+      // The durable lease precedes either direct reply placement or wake delivery.
+      await deliver();
       logInfo(`bridge: captured the compaction brief for ${sessionId}; opening the replacement chat`);
       return json(
         res,
@@ -3113,6 +3157,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // Cancelled, superseded, already sent, or from a previous run of the app. The page
       // does nothing, which is the point: a stale marker must never type anything.
       return json(res, 404, { error: 'no_such_command' }, origin);
+    }
+    if (command.spec.type !== 'stop' && body['isolated'] !== true) {
+      return json(res, 409, { error: 'BACKGROUND_UNAVAILABLE', final: true }, origin);
     }
     if (command.spec.type === 'stop') {
       if (!client || Date.now() - command.createdAt >= 30_000 || reportedConversation !== command.spec.conversationId || !await stopCommandCurrent(command.spec))
@@ -4040,6 +4087,7 @@ export async function stopBridge(): Promise<void> {
   // Invalidate first, before waiting in the lifecycle queue. The currently executing start sees
   // this epoch change at its next await boundary and closes itself before replay/delivery.
   bridgeDesiredRunning = false;
+  for (const reveal of workerChatReveals.values()) reveal.finish(false);
   const epoch = ++bridgeLifecycleEpoch;
   const request = enqueueBridgeLifecycle(async () => {
     // A newer start is the latest user/runtime intent. Do not let this older queued stop close the
@@ -4487,7 +4535,7 @@ export function resumeJobFor(sessionId: string): ResumeJobView | null {
         ? 'failed'
         : entry.state === 'awaiting-summary'
           ? 'handoff-pending'
-          : command && !isLeased(command) && !openInBrowser
+          : command && !isLeased(command) && !browserWakeConnected()
             ? 'waiting-for-browser'
             : 'opening';
   return {
@@ -4692,63 +4740,6 @@ function queueResumeCommand(sessionId: string, token: string): Command {
 
 // ----------------------------------------------------------------- delivery
 
-/**
- * Opens a URL in the user's browser. Wired to Electron's shell at startup.
- *
- * Injected rather than imported so this module stays testable without Electron, and so
- * a build with no window (or a test) simply falls back to the polling path instead of
- * having a browser-launching side effect nobody asked for.
- */
-let openInBrowser: ((url: string) => Promise<void>) | null = null;
-
-/**
- * How long one cold browser start is given to show up before another may be attempted.
- *
- * Opening a URL is cheap when a browser is already running: the launcher hands it to the
- * running instance and exits. Opening one when nothing is running is not — it is a full cold
- * start, and a second launch fired into that window does not join the instance that is still
- * booting, it becomes an instance of its own. This app can queue several browser-backed
- * commands and delivers the next one the moment the previous is dropped or expires, so a
- * browser that never came back was answered with one cold start per command, and a user who
- * closed the browser was answered with another. That is how eight Chrome process trees, each
- * holding its own pinned ChatGPT tabs, end up on one machine.
- *
- * Sixty seconds is `BROWSER_PRESENT_MS`, and deliberately the same number: presence is what
- * ends this wait early, so the wait is over exactly when this app would have stopped believing
- * in the launch anyway. A launch that worked costs nothing — the extension's first poll lands
- * within seconds of the page loading and the next command goes out immediately.
- */
-const BROWSER_LAUNCH_GRACE_MS = BROWSER_PRESENT_MS;
-
-/** When this app last cold-started a browser. Zero until it has, and reset with the bridge. */
-let lastBrowserLaunchAt = 0;
-/** The one deferred delivery owed to a launch still inside its grace window. */
-let browserLaunchTimer: NodeJS.Timeout | null = null;
-
-/**
- * Whether a browser this app started is still inside the window in which it might appear.
- *
- * Presence answers it first and answers it best: a browser that is talking to this process is
- * not a launch anybody is waiting on, whether or not it is the one that was started.
- */
-function browserLaunchPending(now = Date.now()): boolean {
-  return !browserPresent() && now < lastBrowserLaunchAt + BROWSER_LAUNCH_GRACE_MS;
-}
-
-/** Re-runs delivery once the pending launch's window closes, so nothing waits on a lost one. */
-function deliverAfterLaunchWindow(now = Date.now()): void {
-  if (browserLaunchTimer) return;
-  browserLaunchTimer = setTimeout(() => {
-    browserLaunchTimer = null;
-    void deliver();
-  }, Math.max(1, lastBrowserLaunchAt + BROWSER_LAUNCH_GRACE_MS - now + 1));
-  browserLaunchTimer.unref?.();
-}
-
-export function setBrowserOpener(open: ((url: string) => Promise<void>) | null): void {
-  openInBrowser = open;
-}
-
 /** The one place this app writes a ChatGPT conversation URL. */
 export function chatUrl(conversationId: string): string {
   return `https://chatgpt.com/c/${encodeURIComponent(conversationId)}`;
@@ -4823,22 +4814,7 @@ function pendingBrowserRevival(): {
 
 // ------------------------------------------------- where a fresh chat is opened
 
-/**
- * The chat a queued fresh chat belongs beside.
- *
- * A resume's chat B is not a free-floating new tab. It is the second half of one A -> B
- * handoff, and A is a tab in one specific window of one specific browser. A worker's chat has
- * the same kind of home: the prime chat whose run is spawning it.
- *
- * The operating system knows none of that. `chrome.exe <url>` hands the URL to whichever
- * instance the platform resolves to, which is the one that last had focus - so on a machine
- * running two Chrome instances the successor of a chat that had just finished in the
- * background one was created in the foreground one instead. That is the whole failure the
- * user hit: the summary was typed into a chat in a browser the extension was not loaded in,
- * nothing ever redeemed the command, and the handoff died with no connection to it at all.
- *
- * So this app stops asking the OS where its own chats go whenever it can name the home.
- */
+/** Source identity carried with the isolated successor, never placement authority. */
 function commandHomeConversation(spec: CommandSpec): string | null {
   if (spec.type === 'stop') return spec.conversationId;
   if (spec.type === 'resume') return continuationByToken(spec.token)?.from ?? null;
@@ -4847,28 +4823,11 @@ function commandHomeConversation(spec: CommandSpec): string | null {
   return primeConversation(spec.runId);
 }
 
-/**
- * The chat whose own request is in flight right now.
- *
- * Compact & Resume is produced by chat A's page asking for it, so at the instant the command
- * is queued there is a reply about to be written to the one browser that holds A. That, and
- * nothing weaker, is what licenses delivery to hold the OS opener back: a resume queued by
- * the auto-compaction pickup or restored after a restart has no page waiting to be told, and
- * must still be opened the way it always was rather than waiting for a poll that may be
- * thirty seconds away — or, if the tab is gone, never.
- */
-let placementCollector: string | null = null;
-
-/** Transfer opening authority through the companion while it has a live wake connection. */
+/** Transfer the sole opening authority to the connected companion. */
 function offerPlacement(command: Command): boolean {
-  const home = commandHomeConversation(command.spec);
-  const worker = command.spec.type === 'worker' && browserWakeConnected();
-  if (!worker && (!home || home !== placementCollector)) return false;
-  // Worker tabs are implementation details, not navigation. Keep every worker in the
-  // app-owned background window; the user can still foreground an exact chat through
-  // the explicit "Open linked chat" action in the workbench.
-  command.placement = { conversationId: home, background: worker };
-  if (worker) wakeBrowserWork();
+  if (!browserWakeConnected()) return false;
+  command.placement = { conversationId: commandHomeConversation(command.spec), background: true };
+  wakeBrowserWork();
   return true;
 }
 
@@ -4878,7 +4837,7 @@ function pendingBrowserPlacement(conversationId: string | null): {
   background?: true; active: boolean; homeConversationId: string | null; project: string | null;
 } | null {
   const command = commands.find(entry => entry.owner === null && entry.placement &&
-    (entry.placement.conversationId === conversationId || (conversationId === null && entry.spec.type === 'worker')));
+    (entry.placement.conversationId === conversationId || (conversationId === null && entry.placement.background)));
   if (!command?.placement) return null;
   const placement = command.placement;
   delete command.placement;
@@ -4887,7 +4846,7 @@ function pendingBrowserPlacement(conversationId: string | null): {
   return {
     id: command.id, model: worker ? spec.model : null,
     reasoningEffort: worker ? spec.reasoningEffort : null,
-    active: !worker, homeConversationId: placement.conversationId, project: commandProject(command),
+    active: !placement.background, homeConversationId: placement.conversationId, project: commandProject(command),
     ...(placement.background ? { background: true as const } : {})
   };
 }
@@ -5511,26 +5470,9 @@ function queueBrowserRecovery(
     progressId: `browser-repair:${randomBytes(9).toString('base64url')}`
   };
   repairsInFlight.set(conversationId, repair);
-  // A queued durable pickup used to wait forever when Chrome itself had exited:
-  // nobody remained to collect /status. This same accepted repair owns one cold
-  // start through the existing startup owner; no new timer or opening retry exists.
-  if ((reason === 'goal' || reason === 'compaction') && getConfig().ui.browserOnly !== true) {
-    const reply = goalPendingReplyFor(conversationId);
-    const ticket = continuationForSession(sessionId);
-    const lifecycle = bridgeLifecycleEpoch;
-    void wakeBrowserUrl(chatUrl(conversationId), true, getConfig().ui.backgroundChats === true, {
-      current: () => bridgeLifecycleEpoch === lifecycle && !bridgeShutdownRequested &&
-        getConfig().ui.browserOnly !== true &&
-        repairsInFlight.get(conversationId) === repair && repair.state === 'queued' &&
-        !isChatBlocked(conversationId) && !stopRequestedFor(conversationId) &&
-        !supersededSourceConversations().includes(conversationId) &&
-        (reason === 'compaction'
-          ? !!ticket && ticket.from === conversationId && continuationForSession(sessionId)?.token === ticket.token &&
-            continuationForSession(sessionId)?.state === 'awaiting-summary'
-          : goalActiveFor(conversationId) && !!reply && goalPendingReplyFor(conversationId)?.replyId === reply.replyId &&
-            !continuationForSession(sessionId))
-    }).catch((error: Error) => logWarn(`bridge: could not start browser for ${reason} recovery: ${error.message}`));
-  }
+  // Recovery has one existing companion handout; browser absence never grants an
+  // OS launch or another opening attempt. The queued repair remains inspectable.
+  wakeBrowserWork();
   return true;
 }
 
@@ -5713,7 +5655,7 @@ async function browserTabPolicy(openConversations: Set<string>) {
     isGoalDecisionChat(row.conversationId) && (!row.decisionSourceSessionId ||
       summaries.some(source => source.id === row.decisionSourceSessionId && source.conversationId !== row.conversationId)));
   for (const row of cancelledDecisionClaims) managed.add(row.conversationId!);
-  for (const row of inputs) if (!row.sessionId && row.purpose !== 'decision' && row.deliveredAt !== undefined && row.conversationId && openConversations.has(row.conversationId)) managed.add(row.conversationId);
+  for (const row of inputs) if (row.purpose !== 'decision' && row.deliveredAt !== undefined && row.conversationId && openConversations.has(row.conversationId)) managed.add(row.conversationId);
   for (const id of managed) if (runningToolCalls(id) > 0 || goalActiveFor(id)) protectedChats.add(id);
   for (const row of inputs) {
     if (!['queued', 'browser', 'decision'].includes(row.state)) continue;
@@ -5779,6 +5721,7 @@ async function browserTabPolicy(openConversations: Set<string>) {
       .filter(id => openConversations.has(id) && !protectedChats.has(id)).sort(),
     conversationActivityAt: Object.fromEntries(lastActivity),
     managedConversations: [...managed].sort(),
+    isolatedConversations: [...new Set([...managed, ...nonDiscardableAgentConversations()])].sort(),
     reusableConversations: [...openConversations].filter(id => !protectedChats.has(id) && runningToolCalls(id) === 0 && !goalActiveFor(id) && !isChatBlocked(id) &&
       !agentInfoForOwnedConversation(id) && !isGoalDecisionChat(id) && !supersededSourceConversations().includes(id)).sort(),
     nonDiscardableConversations: [...protectedChats].sort(),
@@ -6605,6 +6548,19 @@ function tickUnattributedIncident(): void {
  * chats broken in the same instant into three reloads a minute apart, which is a queueing
  * artefact rather than anything this app decided.
  */
+function repairObligationCurrent(conversationId: string, repair: Repair): boolean {
+  if (repair.reason === 'compaction') {
+    const ticket = continuationForSession(repair.sessionId);
+    return !!ticket && ticket.from === conversationId &&
+      repair.episode.startsWith(`compaction:${ticket.token}:${compactionPhaseOf(ticket)}:`);
+  }
+  if (repair.reason === 'goal') {
+    const reply = goalPendingReplyFor(conversationId);
+    return goalRuntimeAvailable() && goalActiveFor(conversationId) && !!reply &&
+      repair.episode.startsWith(`goal:${reply.replyId}:`);
+  }
+  return true;
+}
 async function takePendingRepairs(
   now = Date.now()
 ): Promise<Array<{ conversationId: string; token: string; reason: Repair['reason']; focus: boolean }>> {
@@ -6617,9 +6573,8 @@ async function takePendingRepairs(
   for (const [conversationId, repair] of [...repairsInFlight]) {
     const session = await getSession(repair.sessionId);
     const superseded = await conversationWasSuperseded(conversationId);
-    const goalUnavailable = repair.reason === 'goal' && !goalRuntimeAvailable();
     if (!isChatBlocked(conversationId) && !superseded && session?.conversationId === conversationId &&
-        !stopRequestedFor(conversationId, session.activeTurnId) && !goalUnavailable) continue;
+        !stopRequestedFor(conversationId, session.activeTurnId) && repairObligationCurrent(conversationId, repair)) continue;
     repairsInFlight.delete(conversationId);
     turnRepairSpent.delete(conversationId);
     const grant = activeUntil.get(conversationId);
@@ -6644,7 +6599,7 @@ async function takePendingRepairs(
     conversationId: string;
     token: string;
     reason: Repair['reason'];
-    /** Raise the tab (or open the chat in front) before acting: a background tab is throttled. */
+    /** Automatic recovery never receives reveal authority. */
     focus: boolean;
   }> = [];
   for (const [conversationId, repair] of repairsInFlight) {
@@ -6659,8 +6614,8 @@ async function takePendingRepairs(
       repair,
       `Trying to reload chat to recover ${repairReason(repair)}…`
     );
-    if (repairsInFlight.get(conversationId) === repair && !stopRequestedFor(conversationId))
-      ready.push({ conversationId, token: repair.token, reason: repair.reason, focus: repair.reason === 'compaction' });
+    if (repairsInFlight.get(conversationId) === repair && !stopRequestedFor(conversationId) && repairObligationCurrent(conversationId, repair))
+      ready.push({ conversationId, token: repair.token, reason: repair.reason, focus: false });
   }
   return ready;
 }
@@ -6720,15 +6675,16 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
 }
 
 /** An exact browser action failed; keep the episode queued and replace its one debug row. */
-async function failRepairAttempt(token: string, action: 'reloaded' | 'reopened' | null): Promise<void> {
+async function failRepairAttempt(token: string, action: 'reloaded' | 'reopened' | null, isolationUnavailable = false): Promise<void> {
   for (const [conversationId, repair] of repairsInFlight) {
     if (repair.state !== 'handed' || repair.token !== token) continue;
     await updateRepairProgress(
       conversationId,
       repair,
-      `${action === 'reopened' ? 'Reopen' : 'Reload'} failed while recovering ${repairReason(repair)}; will retry.`
+      isolationUnavailable ? 'BACKGROUND_UNAVAILABLE: the exact app-owned browser surface could not be confirmed. No personal tab was changed.'
+        : `${action === 'reopened' ? 'Reopen' : 'Reload'} failed while recovering ${repairReason(repair)}; will retry.`
     );
-    repair.state = 'queued';
+    repair.state = isolationUnavailable ? 'done' : 'queued';
     repairsInFlight.delete(conversationId);
     repairsInFlight.set(conversationId, repair);
     return;
@@ -6817,19 +6773,9 @@ async function deliverOne(): Promise<void> {
   tidyCommands();
   const command = nextDeliverable();
   if (!command) return;
-  if (!openInBrowser) {
-    // Nothing can open a browser in this process, and nothing will come and ask. Ending it
-    // here is what keeps the failure honest: the continuation stays in the chat it is in and
-    // the worker slot fails, instead of a job sitting in a queue that has no reader.
-    drop(command, 'this app has no way to open a browser window');
-    return;
-  }
-  // A cold start already under way is the browser this command is going to be opened in. Asking
-  // the operating system for a second one does not join it — it starts a second browser — so
-  // this waits for the first rather than adding to it. Deliberately before the lease: a command
-  // that has not been handed to anything must not be spending its ninety seconds here.
-  if (browserLaunchPending()) {
-    deliverAfterLaunchWindow();
+  if (!browserWakeConnected()) {
+    drop(command, 'BACKGROUND_UNAVAILABLE: connect the browser companion before starting background work. No foreground browser was opened.');
+    scheduleDeliver();
     return;
   }
   const claimedAt = Date.now();
@@ -6842,24 +6788,16 @@ async function deliverOne(): Promise<void> {
   // commit quite correctly refuses to overwrite it. The later durable redeem refreshes the same
   // gate; commit/abort/drop clears it through the continuation state machine.
   if (command.spec.type === 'resume') noteResumeOpening(command.spec.token);
-  // Beside the chat it succeeds, when this app can name that chat and its browser is still
-  // polling. Only that browser can put the new tab in the window the old one is in, and only
-  // a tab it creates itself is guaranteed to be in a browser this extension is loaded in.
+  // The connected companion alone owns placement, for both workers and resumes.
   try {
-    if (!offerPlacement(command)) await openFreshChatInBrowser(command);
+    if (!offerPlacement(command)) {
+      drop(command, 'BACKGROUND_UNAVAILABLE: the browser companion disconnected before isolated placement.');
+    }
   } finally {
     scheduleDeliver();
   }
 }
 
-/**
- * Asks the operating system for a fresh ChatGPT chat, when no home page can place it.
- *
- * The original delivery path, unchanged, and still the only one available when the home chat's
- * tab is gone or the browser is closed — opening the URL is what starts a browser that is not
- * running. It is also the fallback for an offer nobody collected, which is why it is reachable
- * from the placement timer as well as from delivery.
- */
 /**
  * The Project a command's fresh chat belongs in, or null for the site root.
  *
@@ -6871,32 +6809,6 @@ async function deliverOne(): Promise<void> {
 function commandProject(command: Command): string | null {
   if (command.spec.type !== 'resume') return null;
   return continuationByToken(command.spec.token)?.project ?? null;
-}
-
-async function openFreshChatInBrowser(command: Command): Promise<void> {
-  if (!openInBrowser) {
-    drop(command, 'this app has no way to open a browser window');
-    return;
-  }
-  logInfo(`bridge: opening a fresh ChatGPT chat for ${specKey(command.spec)}`);
-  try {
-    // Stamped whether or not a browser was already running: this process cannot tell the
-    // difference, and the window it opens is only ever spent by a browser failing to appear.
-    if (!browserPresent()) lastBrowserLaunchAt = Date.now();
-    await openInBrowser(
-      command.spec.type === 'worker'
-        ? commandUrl(command.id, command.spec.model, command.spec.reasoningEffort)
-        : commandUrl(command.id, null, null, commandProject(command))
-    );
-  } catch (err) {
-    // One command is one browser-open attempt. A rejected opener can never produce an ACK,
-    // so leaving the row unleased merely blocks everything behind it until some unrelated
-    // future action calls deliver() again. End it honestly and immediately, then advance.
-    const why = `the browser could not be opened (${err instanceof Error ? err.message : String(err)})`;
-    command.lastError = why;
-    drop(command, why);
-    await deliver();
-  }
 }
 
 /**
@@ -6951,7 +6863,7 @@ function commandDeadlineDelay(command: Command, now = Date.now()): number {
     // Opened but not yet redeemed remains short even for Pro: no page owns the command yet, so a
     // longer timeout would only hide a browser-opening failure and hold the worker slot hostage.
     if (command.owner === null) {
-      const redeemBy = Math.max(command.claimedAt + WORKER_REDEEM_MS, lastBrowserLaunchAt + BROWSER_LAUNCH_GRACE_MS);
+      const redeemBy = command.claimedAt + WORKER_REDEEM_MS;
       return Math.min(redeemBy, limit) - now;
     }
     return Math.min(command.claimedAt + (pro ? PRO_WORKER_COMMAND_DEADLINE_MS : COMMAND_DEADLINE_MS), limit) - now;
@@ -7459,17 +7371,18 @@ function restoredCommandSpec(version: number, raw: Partial<CommandSpec>): Comman
     // proof this old bootstrap must not be resurrected merely because its run id still matches a
     // sibling's active incarnation. `active` remains valid for the lost-ACK case: the binding may
     // already be durable while the leased browser command is still waiting for its retry.
-    const workerState = swarmState(worker.runId).agents.find((entry) => entry.id === worker.agent && entry.role === 'worker')?.state;
-    if (workerState !== 'invited' && workerState !== 'active') return null;
-    // Rows written before worker models existed carry no model; rows with a malformed one
-    // are repaired to the default rather than refused, so a bad slug can never strand a run.
-    // Reasoning restores under the same rule, against the canonical vocabulary.
+    const workerState = swarmState(worker.runId).agents.find((entry) => entry.id === worker.agent && entry.role === 'worker');
+    if (workerState?.state !== 'invited' && workerState?.state !== 'active') return null;
+    // The durable broker is the execution-selection authority across restart. The browser
+    // command snapshot is transport state and may be older or damaged; silently converting a
+    // malformed/mismatched saved model or effort to null would reopen this worker on the account
+    // default. Rebuild from the exact broker selection instead, just as revival restore does.
     return {
       type: 'worker',
       agent: worker.agent,
-      task: worker.task.slice(0, 512 * 1024),
-      model: isModelSlug(worker.model) ? worker.model : null,
-      reasoningEffort: isReasoningEffort(worker.reasoningEffort) ? worker.reasoningEffort : null,
+      task: workerState.task,
+      model: workerState.model,
+      reasoningEffort: workerState.reasoningEffort,
       runId: worker.runId
     };
   }
@@ -7748,6 +7661,7 @@ export async function restoreCommands(): Promise<void> {
 
 /** Test seam. */
 export function resetBridgeForTests(): void {
+  for (const reveal of workerChatReveals.values()) reveal.finish(false);
   for (const command of commands) if (command.timer) clearTimeout(command.timer);
   if (browserPresenceTimer) clearTimeout(browserPresenceTimer);
   browserPresenceTimer = null;
@@ -7771,10 +7685,6 @@ export function resetBridgeForTests(): void {
   compactionWatchFloor = goalWatchFloor;
   resetContinuationsForTests();
   sessionTokens.clear();
-  openInBrowser = null;
-  if (browserLaunchTimer) clearTimeout(browserLaunchTimer);
-  browserLaunchTimer = null;
-  lastBrowserLaunchAt = 0;
   lastSeenAt = null;
   extensionVersion = null;
   versionWarned = false;

@@ -36,12 +36,22 @@ vi.mock('electron', () => ({
 // This suite owns IPC behavior, not Electron's packaged-vs-checkout path discovery.
 vi.mock('../src/main/extension-path.js', () => ({ extensionDir: () => process.cwd() }));
 vi.mock('../src/main/browser.js', () => ({ openInPreferredBrowser: vi.fn(async () => 'chrome.exe') }));
+// Settings/history tests do not drive a real extension. The worker fixtures explicitly
+// connect a virtual isolated companion; browser transport proof is covered by bridge.test.
+const isolatedCompanion = vi.hoisted(() => ({ connected: false }));
+vi.mock('../src/main/browser-wake.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../src/main/browser-wake.js')>();
+  return { ...original, attachBrowserWake: (...args: Parameters<typeof original.attachBrowserWake>) => {
+    const port = original.attachBrowserWake(...args);
+    return { ...port, connected: () => isolatedCompanion.connected || port.connected() };
+  } };
+});
 
 const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { getSecret, initSecretsPath, resetSecretsCacheForTests } = await import('../src/main/secrets.js');
 const { appendEvent, createSession, initSessionStore, rebindSession, resetSessionStoreForTests } = await import('../src/main/session/store.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
-const { pendingCommands, resetBridgeForTests, setBrowserOpener, startBridge, stopBridge } = await import(
+const { pendingCommands, resetBridgeForTests, startBridge, stopBridge } = await import(
   '../src/main/bridge.js'
 );
 const {
@@ -86,6 +96,9 @@ const renameRoot = (payload: unknown): Promise<any> => handlers.get('roots:renam
 const removeRoot = (payload: unknown): Promise<any> => handlers.get('roots:remove')!(null, payload) as Promise<any>;
 const sessionEvents = (payload: unknown): Promise<any> => handlers.get('sessions:events')!(null, payload) as Promise<any>;
 const sessionList = (): Promise<any> => handlers.get('sessions:list')!(null, undefined) as Promise<any>;
+async function connectIsolatedCompanion(): Promise<void> {
+  await startBridge(); isolatedCompanion.connected = true;
+}
 
 it('validates dropped file count and stages arbitrary native file types', async () => {
   const drop = (payload: unknown) => handlers.get('sessions:dropFiles')!(null, payload) as Promise<any>;
@@ -203,6 +216,7 @@ it('Record Off retires in-flight Goal work even when the app-wide Goal switch wa
 });
 
 it('projects exact retained worker parents without adopting same-name unrelated recordings', async () => {
+  await connectIsolatedCompanion();
   const prime = await createSession({ title: 'Parent', conversationId: 'parent-projection' });
   spawn({ workers: [{ task: 'test parent identity' }], caller: { conversationId: 'parent-projection' } });
   expect(bindConversation('worker-1', 'worker-projection')).toBe(true);
@@ -286,6 +300,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   currentWindow = null;
+  isolatedCompanion.connected = false;
   vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: true, filePaths: [] });
   nativeTheme.themeSource = 'system';
   vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(true);
@@ -295,9 +310,6 @@ beforeEach(async () => {
   resetSwarm();
   resetBridgeForTests();
   resetWorkspaces();
-  // The app opens the worker's chat itself; a command only exists while a page it opened
-  // still has it to redeem.
-  setBrowserOpener(async () => undefined);
   await saveConfig({
     ...defaultConfig(),
     sessions: { ...defaultConfig().sessions, record: true },
@@ -354,7 +366,7 @@ describe('turning multi-agent mode off', () => {
    * durable worker history itself survives; only the pending transport is cancelled.
    */
   it('cancels the run’s queued worker chats before the bridge goes away', async () => {
-    await startBridge();
+    await connectIsolatedCompanion();
     spawn({ workers: [{ task: 'work' }], caller: { conversationId: 'c-prime' } });
     // Opening is asynchronous, as it is in the app.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -368,6 +380,7 @@ describe('turning multi-agent mode off', () => {
   });
 
   it('does not acknowledge the toggle until the parked retained history is durable', async () => {
+    await connectIsolatedCompanion();
     const prime = '11111111-2222-4333-8444-555555555555';
     const worker = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
     spawn({ workers: [{ task: 'must stay fenced after disable' }], caller: { conversationId: prime } });
@@ -402,6 +415,7 @@ describe('turning multi-agent mode off', () => {
   });
 
   it('survives a disabled restart and re-enable with the exact old worker chat still revivable', async () => {
+    await connectIsolatedCompanion();
     const prime = '22222222-3333-4444-8555-666666666666';
     const worker = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
     spawn({ workers: [{ task: 'remember this exact worker' }], caller: { conversationId: prime } });
@@ -442,6 +456,7 @@ describe('turning multi-agent mode off', () => {
   });
 
   it('preserves every parked owner when disabling a different prime that is still active', async () => {
+    await connectIsolatedCompanion();
     const primeA = '33333333-4444-4555-8666-777777777777';
     const workerA = 'cccccccc-dddd-4eee-8fff-000000000001';
     spawn({ workers: [{ task: 'A retained history' }], caller: { conversationId: primeA } });
@@ -481,6 +496,7 @@ describe('turning multi-agent mode off', () => {
   });
 
   it('keeps disabled history until the explicit Clear swarm IPC destroys it', async () => {
+    await connectIsolatedCompanion();
     const prime = '55555555-6666-4777-8888-999999999999';
     const worker = 'eeeeeeee-ffff-4000-8111-000000000003';
     spawn({ workers: [{ task: 'survive disable until explicit clear' }], caller: { conversationId: prime } });
@@ -1094,21 +1110,25 @@ describe('session IPC contracts', () => {
     resetBlockedChatsForTests();
   });
 
-  it('opens only the stored conversation URL in Chrome', async () => {
+  it('reveals only the exact stored conversation through the isolated companion', async () => {
     const session = await createSession({
       title: 'open me',
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     });
-    const reply = await handlers.get('sessions:openChat')!(null, { id: session.id }) as any;
-    expect(reply.ok, reply.error).toBe(true);
-    expect(openInPreferredBrowser).toHaveBeenCalledWith(
-      'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-    );
+    const reveal = vi.spyOn(await import('../src/main/bridge.js'), 'requestWorkerChatReveal').mockResolvedValue(true);
+    vi.mocked(openInPreferredBrowser).mockClear();
+    try {
+      const reply = await handlers.get('sessions:openChat')!(null, { id: session.id }) as any;
+      expect(reply.ok, reply.error).toBe(true);
+      expect(reveal).toHaveBeenCalledExactlyOnceWith('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+      expect(openInPreferredBrowser).not.toHaveBeenCalled();
 
-    const unattributed = await createSession({ title: 'no conversation', conversationId: null });
-    const refused = await handlers.get('sessions:openChat')!(null, { id: unattributed.id }) as any;
-    expect(refused.ok).toBe(false);
-    expect(refused.error).toMatch(/no valid ChatGPT conversation/i);
+      const unattributed = await createSession({ title: 'no conversation', conversationId: null });
+      const refused = await handlers.get('sessions:openChat')!(null, { id: unattributed.id }) as any;
+      expect(refused.ok).toBe(false);
+      expect(refused.error).toMatch(/no valid ChatGPT conversation/i);
+      expect(reveal).toHaveBeenCalledTimes(1);
+    } finally { reveal.mockRestore(); }
   });
 });
 

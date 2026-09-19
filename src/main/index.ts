@@ -13,7 +13,7 @@ import { initLogFile, logError, logInfo, logWarn } from './logger.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
 import { pluginManager } from './plugins/manager.js';
-import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
+import { setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
 import { flushSessions, initSessionStore, pruneSessions } from './session/store.js';
 import {
   flushRecorder,
@@ -75,7 +75,6 @@ import {
 } from './update.js';
 import { inFlightMcpRequests } from './mcp/call-context.js';
 import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme } from './window-layout.js';
-import { openInPreferredBrowser } from './browser.js';
 import {
   applyLoginStartup,
   isBackgroundLaunch,
@@ -406,24 +405,8 @@ void app.whenReady().then(async () => {
   // The prime's chat is the user's own, so no extension report can name it. It is bound
   // when the recorder manages to place the prime's first call. See recordToolCall.
   setAgentBinder(bindConversation);
-  // Before anything can call an agent tool, and before a run is restored: the broker
-  // decides whether a previous run has been abandoned partly from which ChatGPT tabs are
-  // open, and without this it can only answer "I cannot see" — which it treats, on
-  // purpose, as a reason to leave the existing run alone.
-  // How a fresh chat opens when no browser can be asked to open it. The app asks the OS for
-  // the ChatGPT URL, which launches the browser if it is closed and creates the tab if there
-  // is none — the two cases the old "wait for a ChatGPT tab to poll us" delivery could never
-  // handle. Wired before any restored command is delivered, so a resume queued yesterday opens
-  // as soon as the bridge starts rather than waiting for the user to visit ChatGPT.
-  //
-  // It is deliberately not how a page-driven Compact & Resume opens chat B. The OS resolves a
-  // URL to whichever browser instance last had focus, which is a different window — and can be
-  // a browser without this extension in it — from the one holding chat A. That decision belongs
-  // to the browser that owns the source chat; see bridge.ts::offerPlacement.
-  setBrowserOpener(async (url) => {
-    // Let the command owner report launch failure; another browser may belong to another account.
-    await openInPreferredBrowser(url);
-  });
+  // Task placement belongs to the paired companion. A disconnected browser cannot
+  // authorize an OS opener that might take over an unrelated foreground window.
 
   // Persistence is a process-lifetime dependency of the broker, not a feature-toggle
   // dependency. Multi-agent can be enabled from Settings without restarting the process;

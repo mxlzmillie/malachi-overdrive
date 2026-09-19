@@ -188,6 +188,38 @@ async function captureControlRail(name, width, height, theme = 'dark') {
   fs.writeFileSync(path.join(output, `${name}.png`), (await win.webContents.capturePage()).resize({ width }).toPNG());
 }
 
+async function captureAmbientEdge(name, width, height, theme = 'dark') {
+  win.setContentSize(width, height);
+  await evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+  await evaluate(() => {
+    const rail = document.getElementById('controlRail');
+    if (!rail.hidden) document.getElementById('controlRailToggle').click();
+    const edge = document.querySelector('.ambient-edge-main');
+    if (edge.getAttribute('aria-expanded') !== 'true') edge.click();
+  });
+  await waitFor(() => !document.querySelector('.ambient-peek').hidden, 'Ambient Edge preview opened');
+  await new Promise(resolve => setTimeout(resolve, 180));
+  const geometry = await evaluate(() => {
+    const peek = document.querySelector('.ambient-peek').getBoundingClientRect();
+    const edge = document.querySelector('.ambient-edge').getBoundingClientRect();
+    const composer = document.getElementById('composer').getBoundingClientRect();
+    return {
+      width: innerWidth, height: innerHeight,
+      peek: { left: peek.left, top: peek.top, right: peek.right, bottom: peek.bottom },
+      edge: { left: edge.left, top: edge.top, right: edge.right, bottom: edge.bottom },
+      composerVisible: composer.left >= -1 && composer.right <= innerWidth + 1 && composer.bottom <= innerHeight + 1,
+      railHidden: document.getElementById('controlRail').hidden,
+      scrimHidden: document.querySelector('.control-rail-scrim').hidden,
+      bodyOverflow: document.documentElement.scrollWidth - innerWidth
+    };
+  });
+  check(geometry.peek.left >= -1 && geometry.peek.top >= -1 && geometry.peek.right <= geometry.width + 1 && geometry.peek.bottom <= geometry.height + 1, `${name}: Ambient preview fits viewport`);
+  check(geometry.edge.left >= -1 && geometry.edge.top >= -1 && geometry.edge.right <= geometry.width + 1 && geometry.edge.bottom <= geometry.height + 1, `${name}: Ambient capsule fits viewport`);
+  check(geometry.railHidden && geometry.scrimHidden && geometry.composerVisible && geometry.bodyOverflow <= 1, `${name}: compact preview leaves the work page usable without a modal scrim`);
+  fs.writeFileSync(path.join(output, `${name}.png`), (await win.webContents.capturePage()).resize({ width }).toPNG());
+  await evaluate(() => document.querySelector('.ambient-peek-close').click());
+}
+
 const deadline = setTimeout(() => { console.error('QA deadline reached'); app.exit(1); }, 100000);
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => {
@@ -286,6 +318,9 @@ app.whenReady().then(async () => {
     const body = document.getElementById('chatBody'); body.scrollTop = Math.min(40, Math.max(0, body.scrollHeight - body.clientHeight));
     window.__qaRailBefore = { draft: input.value, scroll: body.scrollTop };
   });
+  await captureAmbientEdge('ambient-edge-desktop-dark', 1440, 900);
+  await captureAmbientEdge('ambient-edge-mobile-390', 390, 844);
+  win.setContentSize(1440, 900);
   await captureControlRail('control-rail-desktop-dark', 1440, 900);
   check(await evaluate(() => {
     const before = window.__qaRailBefore, body = document.getElementById('chatBody');

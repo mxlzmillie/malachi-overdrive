@@ -11,6 +11,19 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.20] — 2026-09-19
+
+- Added Ambient Edge, a compact right-edge live-work surface that shows genuine task, worker,
+  activity and output state without shrinking or covering the main conversation.
+- Added an explicit compact-to-workbench flow: the detailed Control Rail opens only when requested,
+  while Escape, focus restoration, reduced-motion support and responsive layouts remain accessible.
+- Added quiet, event-driven completion alerts that appear only after a real work-state transition
+  and never invent a progress percentage or preview that MALACHI OVERDRIVE cannot prove.
+- Worker chats now always open in the app-owned, unfocused background window instead of entering the
+  user's active browser window. An exact chat is foregrounded only through an explicit user action.
+
+See [the full release notes](docs/release-notes/v2.0.20.md).
+
 ## [2.0.19] — 2026-09-17
 
 - Fixed worker model bootstrap when ChatGPT exposes a short model family id such as `5.6` but the

@@ -4483,7 +4483,7 @@ describe('targeted open', () => {
 // ------------------------------------------------------- worker bootstrap failure
 
 describe('a worker chat that never opens', () => {
-  it.each([true, false])('places two workers once through the companion with background window=%s', async (backgroundChats) => {
+  it.each([true, false])('places two workers in the background regardless of the general chat preference=%s', async (backgroundChats) => {
     await pair();
     const config = getConfig();
     await saveConfig({ ...config, ui: { ...config.ui, backgroundChats } });
@@ -4499,7 +4499,7 @@ describe('a worker chat that never opens', () => {
       placement ||= result.body.placement;
       expect(placement?.id).toBeTruthy();
       expect(placement.active).toBe(false);
-      expect(placement.background === true).toBe(backgroundChats);
+      expect(placement.background).toBe(true);
     });
     expect(opened).toEqual([]);
     let second: any;

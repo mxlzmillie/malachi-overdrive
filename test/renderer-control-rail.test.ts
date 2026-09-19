@@ -178,4 +178,38 @@ describe('Control Rail interactions', () => {
     expect(host.querySelector<HTMLElement>('#controlRail')!.hidden).toBe(true);
     expect(document.activeElement).toBe(toggle);
   });
+
+  it('keeps the page free with a compact ambient preview and opens the full workbench only on request', () => {
+    dom = new JSDOM('<div class="app"><main id="page">Keep using this page</main><button id="toggle"></button></div>', { pretendToBeVisual: true });
+    Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node });
+    const host = document.querySelector<HTMLElement>('.app')!, toggle = document.querySelector<HTMLButtonElement>('#toggle')!;
+    const rail = createControlRail({ host, toggle, loadWorker: async () => ({ events: [] }), renderWorker: () => [], openMain: vi.fn(), copyPath: async () => true,
+      actions: { newTask: vi.fn(), commands: vi.fn(), projectFiles: vi.fn(), activity: vi.fn(), openChat: vi.fn(), refreshModels: vi.fn(), setup: vi.fn() } });
+    rail.update(snapshot());
+    expect(host.classList.contains('has-control-rail')).toBe(false);
+    expect(host.querySelector<HTMLElement>('.ambient-edge')?.dataset.tone).toBe('live');
+    host.querySelector<HTMLButtonElement>('.ambient-edge-main')!.click();
+    expect(rail.isPeekOpen()).toBe(true);
+    expect(host.querySelector<HTMLElement>('.ambient-peek')!.hidden).toBe(false);
+    expect(host.querySelector<HTMLElement>('#controlRail')!.hidden).toBe(true);
+    expect(host.querySelector('#page')?.textContent).toBe('Keep using this page');
+    host.querySelector<HTMLButtonElement>('.ambient-peek-primary')!.click();
+    expect(rail.isPeekOpen()).toBe(false);
+    expect(rail.isOpen()).toBe(true);
+  });
+
+  it('announces a real completion transition without opening either surface', () => {
+    vi.useFakeTimers();
+    dom = new JSDOM('<div class="app"><button id="toggle"></button></div>', { pretendToBeVisual: true });
+    Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node });
+    const host = document.querySelector<HTMLElement>('.app')!, toggle = document.querySelector<HTMLButtonElement>('#toggle')!;
+    const rail = createControlRail({ host, toggle, loadWorker: async () => ({ events: [] }), renderWorker: () => [], openMain: vi.fn(), copyPath: async () => true,
+      actions: { newTask: vi.fn(), commands: vi.fn(), projectFiles: vi.fn(), activity: vi.fn(), openChat: vi.fn(), refreshModels: vi.fn(), setup: vi.fn() } });
+    rail.update(snapshot()); rail.update({ ...snapshot(), runState: 'COMPLETE', outputs: [{ id: 'out', title: 'Project files', type: 'File', time: T0, status: 'created' }] });
+    expect(host.querySelector<HTMLElement>('.ambient-complete')!.hidden).toBe(false);
+    expect(host.querySelector('.ambient-complete')?.textContent).toContain('Project files is ready');
+    expect(rail.isOpen()).toBe(false); expect(rail.isPeekOpen()).toBe(false);
+    vi.advanceTimersByTime(7000); expect(host.querySelector<HTMLElement>('.ambient-complete')!.hidden).toBe(true);
+    vi.useRealTimers();
+  });
 });

@@ -7423,7 +7423,7 @@
     },
     {
       "id": "gvdb",
-      "url": "https://gitlab.gnome.org/GNOME/gvdb/-/archive/2b42fc75f09dbe1cd1057580b5782b08f2dcb400/gvdb-2b42fc75f09dbe1cd1057580b5782b08f2dcb400.tar.gz",
+      "url": "https://gitlab.gnome.org/api/v4/projects/GNOME%2Fgvdb/repository/archive.tar.gz?sha=2b42fc75f09dbe1cd1057580b5782b08f2dcb400",
       "version": "2b42fc75f09dbe1cd1057580b5782b08f2dcb400",
       "type": "archive",
       "targets": [
@@ -8083,5 +8083,5 @@
       "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
     }
   ],
-  "componentNoticesSha256": "eb237a1980d9fcc7fe64220507a86cfa89aed681df464bacc72f6ce63ed90e39"
+  "componentNoticesSha256": "efd36b530aab6e1016f574f373d0d9dba27253fedb70774d916a99963308d062"
 }

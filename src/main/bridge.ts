@@ -4864,7 +4864,10 @@ function offerPlacement(command: Command): boolean {
   const home = commandHomeConversation(command.spec);
   const worker = command.spec.type === 'worker' && browserWakeConnected();
   if (!worker && (!home || home !== placementCollector)) return false;
-  command.placement = { conversationId: home, background: worker && getConfig().ui.backgroundChats === true };
+  // Worker tabs are implementation details, not navigation. Keep every worker in the
+  // app-owned background window; the user can still foreground an exact chat through
+  // the explicit "Open linked chat" action in the workbench.
+  command.placement = { conversationId: home, background: worker };
   if (worker) wakeBrowserWork();
   return true;
 }

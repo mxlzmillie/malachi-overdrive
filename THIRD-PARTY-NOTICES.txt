@@ -117747,7 +117747,7 @@ freely, subject to the following restrictions:
 
 ================================================================================
 gvdb 2b42fc75f09dbe1cd1057580b5782b08f2dcb400
-Source: https://gitlab.gnome.org/GNOME/gvdb/-/archive/2b42fc75f09dbe1cd1057580b5782b08f2dcb400/gvdb-2b42fc75f09dbe1cd1057580b5782b08f2dcb400.tar.gz
+Source: https://gitlab.gnome.org/api/v4/projects/GNOME%2Fgvdb/repository/archive.tar.gz?sha=2b42fc75f09dbe1cd1057580b5782b08f2dcb400
 Source SHA-256: 069a00aa1fc893f18423602f4e095583be5a220429f6e8a58d70511490b4b019
 
 --- gvdb-2b42fc75f09dbe1cd1057580b5782b08f2dcb400/COPYING ---
@@ -162010,7 +162010,6 @@ consistent with the licensing of the Independent Modules.
 The availability of this Exception does not imply any general
 presumption that third-party software is unaffected by the copyleft
 requirements of the license of GCC.
-
 
 
 

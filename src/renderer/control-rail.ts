@@ -588,12 +588,44 @@ export function createControlRail(options: ControlRailOptions) {
   const back = button('Back', 'i-chev'); const inspectorTitle = document.createElement('strong'); const openFull = button('Open full chat', 'i-out');
   inspectorHead.append(back, inspectorTitle, openFull); const inspectorBody = document.createElement('div'); inspectorBody.className = 'control-rail-inspector-body'; inspector.append(inspectorHead, inspectorBody);
   const scrim = document.createElement('div'); scrim.className = 'control-rail-scrim'; scrim.hidden = true;
-  rail.append(resize, header, live, facts, quick, scroller, inspector); options.host.append(scrim, rail);
+  const ambient = document.createElement('aside'); ambient.className = 'ambient-edge'; ambient.setAttribute('aria-label', 'Background work');
+  const ambientMain = document.createElement('button'); ambientMain.type = 'button'; ambientMain.className = 'ambient-edge-main'; ambientMain.setAttribute('aria-expanded', 'false');
+  const ambientRing = document.createElement('span'); ambientRing.className = 'ambient-edge-ring'; ambientRing.append(makeIcon('i-bolt'));
+  const ambientState = document.createElement('span'); ambientState.className = 'ambient-edge-state';
+  const ambientTime = document.createElement('span'); ambientTime.className = 'ambient-edge-time';
+  ambientMain.append(ambientRing, ambientState, ambientTime);
+  const ambientNew = button('', 'i-plus'); ambientNew.className = 'ambient-edge-new'; ambientNew.setAttribute('aria-label', 'Start a new task'); ambientNew.title = 'New task'; ambientNew.addEventListener('click', options.actions.newTask);
+  ambient.append(ambientMain, ambientNew);
+
+  const peek = document.createElement('section'); peek.id = 'ambientEdgePeek'; peek.className = 'ambient-peek'; peek.hidden = true; peek.setAttribute('aria-label', 'Background work preview');
+  const peekHead = document.createElement('header'); peekHead.className = 'ambient-peek-head';
+  const peekHeading = document.createElement('div'); peekHeading.append(document.createElement('strong'), document.createElement('span'));
+  peekHeading.querySelector('strong')!.textContent = 'WORKING IN BACKGROUND'; peekHeading.querySelector('span')!.textContent = 'The page stays yours while MALACHI works.';
+  const peekClose = button('', 'i-x'); peekClose.className = 'ambient-peek-close'; peekClose.setAttribute('aria-label', 'Close background preview'); peekHead.append(peekHeading, peekClose);
+  const peekPreview = document.createElement('div'); peekPreview.className = 'ambient-peek-preview';
+  const peekGlyph = document.createElement('span'); peekGlyph.className = 'ambient-peek-glyph'; peekGlyph.append(makeIcon('i-pulse'));
+  const peekCopy = document.createElement('div'); const peekTitle = document.createElement('strong'); const peekAction = document.createElement('span'); peekCopy.append(peekTitle, peekAction); peekPreview.append(peekGlyph, peekCopy);
+  const peekFacts = document.createElement('div'); peekFacts.className = 'ambient-peek-facts';
+  const peekWorkers = document.createElement('span'); const peekOutputs = document.createElement('span'); peekFacts.append(peekWorkers, peekOutputs);
+  const peekActions = document.createElement('div'); peekActions.className = 'ambient-peek-actions';
+  const keepBackground = button('Keep in background', 'i-eye'); keepBackground.classList.add('ambient-peek-quiet');
+  const openWorkbench = button('Open workbench', 'i-out'); openWorkbench.classList.add('ambient-peek-primary'); peekActions.append(keepBackground, openWorkbench);
+  peek.append(peekHead, peekPreview, peekFacts, peekActions);
+
+  const completion = document.createElement('aside'); completion.className = 'ambient-complete'; completion.hidden = true; completion.setAttribute('role', 'status'); completion.setAttribute('aria-live', 'polite');
+  const completionIcon = document.createElement('span'); completionIcon.className = 'ambient-complete-icon'; completionIcon.append(makeIcon('i-bolt'));
+  const completionCopy = document.createElement('div'); const completionTitle = document.createElement('strong'); completionTitle.textContent = 'Work complete'; const completionDetail = document.createElement('span'); completionCopy.append(completionTitle, completionDetail);
+  const completionClose = button('', 'i-x'); completionClose.className = 'ambient-complete-close'; completionClose.setAttribute('aria-label', 'Dismiss completion'); completion.append(completionIcon, completionCopy, completionClose);
+
+  rail.append(resize, header, live, facts, quick, scroller, inspector); options.host.append(scrim, rail, peek, ambient, completion);
+  ambientMain.setAttribute('aria-controls', peek.id);
 
   let snapshot: ControlRailSnapshot | null = null;
   let selectedWorker: string | null = null;
   let parentKey = '';
   let loadGeneration = 0;
+  let previousRunState: ControlRailRunState | null = null;
+  let completionTimer: ReturnType<typeof setTimeout> | null = null;
   const seenWorkers = new Map<string, number>();
   const workerUpdates = new Map<string, number>();
 
@@ -605,6 +637,20 @@ export function createControlRail(options: ControlRailOptions) {
     if (rail.hidden) return;
     rail.hidden = true; scrim.hidden = true; options.host.classList.remove('has-control-rail'); options.toggle.setAttribute('aria-expanded', 'false');
     if (restoreFocus) options.toggle.focus();
+  }
+  function openPeek(): void {
+    if (!peek.hidden) return;
+    peek.hidden = false; ambientMain.setAttribute('aria-expanded', 'true'); options.host.classList.add('has-ambient-peek');
+  }
+  function hidePeek(restoreFocus = false): void {
+    if (peek.hidden) return;
+    peek.hidden = true; ambientMain.setAttribute('aria-expanded', 'false'); options.host.classList.remove('has-ambient-peek');
+    if (restoreFocus) ambientMain.focus();
+  }
+  function showCompletion(detail: string): void {
+    completionDetail.textContent = detail; completion.hidden = false;
+    if (completionTimer) clearTimeout(completionTimer);
+    completionTimer = setTimeout(() => { completion.hidden = true; completionTimer = null; }, 7000);
   }
   function focusSection(id: SectionId): void {
     open(); const target = sections[id].details; target.open = true; target.scrollIntoView({ block: 'nearest' });
@@ -637,6 +683,22 @@ export function createControlRail(options: ControlRailOptions) {
     run.textContent = snapshot.runState; run.dataset.tone = stateTone(snapshot.runState);
     transport.textContent = snapshot.transport; conversation.textContent = snapshot.conversation;
     paintFacts(snapshot.facts);
+
+    const active = snapshot.agents.find(agent => ['active', 'waking', 'invited'].includes(agent.state)) ?? snapshot.agents[0];
+    const latest = snapshot.activity[0];
+    const runtimeFrom = active?.activatedAt ?? active?.createdAt;
+    ambient.dataset.tone = stateTone(snapshot.runState);
+    ambientMain.setAttribute('aria-label', `${snapshot.runState.toLowerCase()}: ${active?.task || snapshot.conversation}`);
+    ambientState.textContent = snapshot.runState === 'RUNNING' ? 'LIVE' : snapshot.runState;
+    ambientTime.textContent = runtimeFrom && snapshot.runState === 'RUNNING' ? formatDuration(Math.max(0, Date.now() - runtimeFrom)) : '';
+    peekTitle.textContent = active?.task ? clip(active.task, 72) : snapshot.conversation;
+    peekAction.textContent = latest ? metadata([latest.title, latest.detail && clip(latest.detail, 84)]) : active?.lastAction ?? (snapshot.runState === 'RUNNING' ? 'Starting the next step…' : 'No active work');
+    peekWorkers.textContent = `${snapshot.agents.filter(agent => ['active', 'waking', 'invited'].includes(agent.state)).length} active`;
+    peekOutputs.textContent = `${snapshot.outputs.length} output${snapshot.outputs.length === 1 ? '' : 's'}`;
+    if (previousRunState && previousRunState !== 'COMPLETE' && snapshot.runState === 'COMPLETE') {
+      showCompletion(snapshot.outputs[0]?.title ? `${snapshot.outputs[0].title} is ready.` : `${snapshot.conversation} is ready.`);
+    }
+    previousRunState = snapshot.runState;
 
     sections.outputs.count.textContent = String(snapshot.outputs.length);
     reconcile(sections.outputs.body, snapshot.outputs, () => rowShell(), (row, item) => {
@@ -714,8 +776,13 @@ export function createControlRail(options: ControlRailOptions) {
 
   options.toggle.setAttribute('aria-controls', rail.id); options.toggle.setAttribute('aria-expanded', 'false');
   options.toggle.addEventListener('click', () => rail.hidden ? open() : hide(true)); close.addEventListener('click', () => hide(true)); scrim.addEventListener('click', () => hide(true));
+  ambientMain.addEventListener('click', () => peek.hidden ? openPeek() : hidePeek(true)); peekClose.addEventListener('click', () => hidePeek(true)); keepBackground.addEventListener('click', () => hidePeek(true));
+  openWorkbench.addEventListener('click', () => { hidePeek(); open(); }); completionClose.addEventListener('click', () => { completion.hidden = true; if (completionTimer) clearTimeout(completionTimer); completionTimer = null; });
   back.addEventListener('click', showDeck); openFull.addEventListener('click', () => { if (!selectedWorker) return; const id = selectedWorker; showDeck(); hide(); options.openMain(id); });
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !peek.hidden && rail.hidden && !document.querySelector('dialog[open]')) {
+      event.preventDefault(); hidePeek(true); return;
+    }
     if (event.key === 'Escape' && !rail.hidden && !document.querySelector('dialog[open]')) {
       event.preventDefault();
       if (selectedWorker) showDeck(); else hide(true);
@@ -733,5 +800,5 @@ export function createControlRail(options: ControlRailOptions) {
     options.host.classList.add('is-resizing-control-rail'); window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop, { once: true });
   });
 
-  return { update: paint, open, hide, openWorker, focusSection, isOpen: () => !rail.hidden };
+  return { update: paint, open, hide, openPeek, hidePeek, openWorker, focusSection, isOpen: () => !rail.hidden, isPeekOpen: () => !peek.hidden };
 }

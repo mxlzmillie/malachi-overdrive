@@ -102,7 +102,7 @@ vi.mock('../src/main/logger.js', () => ({ logInfo: vi.fn(), logWarn: vi.fn() }))
 // The child process is mocked, but Darwin still resolves the native host before spawn.
 vi.stubEnv('COS_MACOS_DESKTOP_HELPER', process.execPath);
 
-import { listWindows } from '../src/main/computer/index.js';
+import { helperStartupGraceMs, helperTimeoutMs, listWindows } from '../src/main/computer/index.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -152,9 +152,11 @@ describe('desktop helper retirement ordering', () => {
         firstError = error;
       }
     );
-    // Window metadata has its own short deadline; the 30s watchdog remains only the
-    // final boundary for unknown operations.
-    await vi.advanceTimersByTimeAsync(15_000);
+    // Window metadata keeps its short steady-state deadline, while a cold native Windows ARM
+    // helper gets a longer one-time compilation allowance before stdin is serviceable.
+    await vi.advanceTimersByTimeAsync(
+      helperTimeoutMs({ op: 'windows' }) + helperStartupGraceMs()
+    );
     await Promise.resolve();
     expect(fake.terminateProcessTree).toHaveBeenCalledWith(9000);
 

@@ -76,13 +76,19 @@ vi.mock('../src/main/logger.js', () => ({ logInfo: vi.fn(), logWarn: vi.fn() }))
 // Point that resolver at a real executable so this test remains about protocol handling.
 vi.stubEnv('COS_MACOS_DESKTOP_HELPER', process.execPath);
 
-import { helperTimeoutMs, listWindows } from '../src/main/computer/index.js';
+import { helperStartupGraceMs, helperTimeoutMs, listWindows } from '../src/main/computer/index.js';
 
 describe('desktop helper protocol validation', () => {
   it('budgets a macOS act request for cumulative focus polling', () => {
     const actions = Array.from({ length: 20 }, (_, index) => ({ type: 'focus', window: index + 1 }));
     expect(helperTimeoutMs({ op: 'act', actions }, 'darwin')).toBe(57_000);
     expect(helperTimeoutMs({ op: 'act', actions }, 'win32')).toBe(15_000);
+  });
+
+  it('gives native Windows ARM cold startup its own compilation allowance', () => {
+    expect(helperStartupGraceMs('win32', 'arm64')).toBe(30_000);
+    expect(helperStartupGraceMs('win32', 'x64')).toBe(10_000);
+    expect(helperStartupGraceMs('darwin', 'arm64')).toBe(10_000);
   });
 
   it('rejects syntactically valid JSON that is not a protocol response', async () => {

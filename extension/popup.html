@@ -112,6 +112,11 @@
     <div class="actions reload-action">
       <button id="reloadBtn" type="button">Reload companion</button>
     </div>
+    <div class="recovery-action" id="recoveryAction" hidden>
+      <p>Lost this task's background window after a browser restart?</p>
+      <button id="recoverChatBtn" type="button">Reconnect this task chat</button>
+      <p id="recoveryResult" role="status" aria-live="polite"></p>
+    </div>
 
     </div>
     <script src="popup.js"></script>

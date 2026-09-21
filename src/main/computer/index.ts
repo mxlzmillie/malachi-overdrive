@@ -38,6 +38,7 @@ export const DEFAULT_SCREENSHOT_WIDTH = 1280;
 export const MAX_SCREENSHOT_WIDTH = 2560;
 const HELPER_TIMEOUT_MS = 30_000;
 const HELPER_STARTUP_GRACE_MS = 10_000;
+const WINDOWS_ARM64_HELPER_STARTUP_GRACE_MS = 30_000;
 const MAX_FRAMES = 16;
 /** Per-image ceiling; the final Desktop tool layer separately measures text + image together. */
 export const MAX_SCREENSHOT_PNG_BYTES = Math.floor((((8 * 1024 * 1024) - (64 * 1024)) * 3) / 4);
@@ -283,6 +284,16 @@ export function helperTimeoutMs(
     default:
       return HELPER_TIMEOUT_MS;
   }
+}
+
+/** Cold Windows ARM startup includes PowerShell loading and one-time C#/UIA compilation. */
+export function helperStartupGraceMs(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch
+): number {
+  return platform === 'win32' && arch === 'arm64'
+    ? WINDOWS_ARM64_HELPER_STARTUP_GRACE_MS
+    : HELPER_STARTUP_GRACE_MS;
 }
 
 function retireHelper(runtime: HelperRuntime): Promise<void> {
@@ -744,7 +755,7 @@ async function sendHelperRequest(request: Record<string, unknown>, expected?: Ex
     const timer = setTimeout(() => {
       if (runtime.pending !== pending) return;
       rejectAfterHelperRetirement(runtime, pending, new ComputerError('The desktop helper did not answer in time.'));
-    }, helperTimeoutMs(request) + (runtime.ready ? 0 : HELPER_STARTUP_GRACE_MS));
+    }, helperTimeoutMs(request) + (runtime.ready ? 0 : helperStartupGraceMs()));
     pending = { resolve, reject, timer };
     runtime.pending = pending;
     runtime.child.stdin.write(`${JSON.stringify(request)}\n`, 'utf8', (error) => {

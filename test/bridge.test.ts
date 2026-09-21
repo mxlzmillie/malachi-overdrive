@@ -4544,6 +4544,18 @@ describe('a worker chat that never opens', () => {
     expect((await request('POST', '/browser/worker-reveal', { body: { ...reveal, ok: true } })).status).toBe(409);
   });
 
+  it('confirms only a unique current app-owned chat for explicit popup recovery', async () => {
+    await pair();
+    const personal = 'cafe0919-1111-4222-8333-444444444445';
+    const task = 'cafe0919-1111-4222-8333-444444444446';
+    await createSession({ conversationId: personal, title: 'Personal chat' });
+    await createSession({ conversationId: task, title: 'App task',
+      origin: { kind: 'desktop', fromSessionId: null, agentId: null, task: '' } });
+    expect((await request('POST', '/browser/recovery-ownership', { body: { conversationId: personal } })).status).toBe(409);
+    expect((await request('POST', '/browser/recovery-ownership', { body: { conversationId: task } })).body).toMatchObject({ ok: true });
+    expect((await request('POST', '/browser/recovery-ownership', { body: { conversationId: 'cafe0919-1111-4222-8333-444444444447' } })).status).toBe(409);
+  });
+
   it.each([true, false])('places two workers in the background regardless of the general chat preference=%s', async (backgroundChats) => {
     await pair(false);
     const config = getConfig();

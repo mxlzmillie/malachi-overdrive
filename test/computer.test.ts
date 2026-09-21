@@ -280,9 +280,13 @@ public static class AmbientUiaFixture {
           reject(new Error(`UIA fixture exited (${code}): ${stderr}`));
         });
       });
-      const result = await findUi({ window: owned.window, query: 'Owned UIA button', role: 'Button', maxResults: 5 });
+      // Hosted Windows UIA providers can expose a raw native BUTTON as Pane.
+      // Verify the exact owned child first, then check filtering against the
+      // provider's observed role rather than assuming a visual-style mapping.
+      const result = await findUi({ window: owned.window, query: 'Owned UIA button', maxResults: 5 });
       expect(result.window).toBe(owned.window);
-      if (!result.elements.some((element) => element.name === 'Owned UIA button')) {
+      const child = result.elements.find(element => element.name === 'Owned UIA button' && element.automationId === '101');
+      if (!child) {
         const unfiltered = await findUi({ window: owned.window, maxResults: 20 });
         throw new Error(
           `Owned native BUTTON ${owned.button} missing from UIA ControlView; ` +
@@ -292,6 +296,12 @@ public static class AmbientUiaFixture {
       expect(result.elements.length).toBeLessThanOrEqual(5);
       expect(result.snapshotId).toBeGreaterThan(0);
       for (const element of result.elements) expect(element.ref).toMatch(/^g\d+_s\d+_e\d+$/);
+      expect(child.bounds.width).toBeGreaterThan(0);
+      expect(child.bounds.height).toBeGreaterThan(0);
+      const matchingRole = await findUi({ window: owned.window, query: child.name, role: child.role, maxResults: 5 });
+      expect(matchingRole.elements.some(element => element.name === child.name && element.automationId === child.automationId)).toBe(true);
+      const wrongRole = await findUi({ window: owned.window, query: child.name, role: 'Tree', maxResults: 5 });
+      expect(wrongRole.elements).toEqual([]);
     } finally {
       fixture.kill();
       await closed;

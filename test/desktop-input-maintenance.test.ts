@@ -104,9 +104,14 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
   const ownedWindow = { id: 80, state: 'minimized', focused: false };
   const windows = {
     get: vi.fn(async (id: number) => id === 80 ? { ...ownedWindow } : { id, state: 'normal', focused: true }),
-    create: vi.fn(async ({ url }: { url: string }) => {
+    create: vi.fn(async ({ url, tabId }: { url?: string; tabId?: number }) => {
+      if (tabId !== undefined) {
+        const tab = tabs.find(row => row.id === tabId)!;
+        tab.windowId = 81;
+        return { id: 81, state: 'normal', focused: true, tabs: [tab] };
+      }
       Object.assign(ownedWindow, { state: 'minimized', focused: false });
-      return { ...ownedWindow, tabs: [await create({ url, windowId: 80 })] };
+      return { ...ownedWindow, tabs: [await create({ url: url!, windowId: 80 })] };
     }),
     update: vi.fn(async (id: number, patch: Partial<typeof ownedWindow>) => {
       if (id === 80) Object.assign(ownedWindow, patch);
@@ -117,6 +122,7 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
   const reload = vi.fn(async (_id: number) => {});
   const sendMessage = vi.fn(async (_id: number, _message: any): Promise<{ ok: boolean; ready?: boolean }> => ({ ok: true, ready: true }));
   const update = vi.fn(async (id: number, patch: Partial<Tab>) => { const tab = tabs.find(tab => tab.id === id)!; Object.assign(tab, patch); if (patch.url) delete tab.pendingUrl; return tab; });
+  const get = vi.fn(async (id: number) => tabs.find(tab => tab.id === id));
   const executeScript = vi.fn(async () => []);
   const insertCSS = vi.fn(async () => {});
   const fetch = vi.fn(async (input: string, _init?: RequestInit): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> => ({
@@ -130,13 +136,13 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
       storage: { local, session },
       windows,
       runtime: { getManifest: () => ({ version: '2.0.5' }), onMessage: event, onInstalled: event, onStartup: event },
-      tabs: { query: async () => {
+      tabs: { query: async (filter?: { windowId?: number }) => {
         // Unless explicitly placed elsewhere, fixture documents are already app-owned.
         const owned = tabs.filter(tab => tab.windowId === undefined);
         for (const tab of owned) tab.windowId = 80;
         if (owned.length) { saved.chatBackgroundWindow = 80; saved.chatBackgroundTabs = [...new Set([...(saved.chatBackgroundTabs as number[] ?? []), ...owned.map(tab => tab.id)])]; }
-        return [...tabs];
-      }, get: async (id: number) => tabs.find(tab => tab.id === id), remove, reload, create, update, sendMessage, onCreated: event, onUpdated: event, onRemoved: event },
+        return tabs.filter(tab => filter?.windowId === undefined || tab.windowId === filter.windowId);
+      }, get, remove, reload, create, update, sendMessage, onCreated: event, onUpdated: event, onRemoved: event },
       alarms: { onAlarm: event, create: () => {}, clear: async () => true },
       scripting: { executeScript, insertCSS }
     },
@@ -146,7 +152,7 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
   const api = context.testMaintenance as { settleRetirements(): Promise<unknown>; pruneManagedTabs(...args: any[]): Promise<any>; releaseTab(...args: any[]): Promise<any>; serializeTab(tab: number, operation: () => Promise<any>): Promise<any>; noteTabConversation(source: any, conversationId: string): Promise<any>; applyRequestedBrowserPreferences(request: object): Promise<void>; authorizeDocument(sender: unknown, message: unknown): Promise<any>; catalog(message: unknown, sender: unknown, source: unknown): Promise<any>; load(): Promise<void>; maintain(woken?: boolean): Promise<void>; createChatTab(url: string, background: boolean): Promise<Tab> };
   await api.load();
   vm.runInContext('Object.assign(testMaintenance, { offerStopTurns, noteTabConversation, ackCommand })', context);
-  return { ...api, update, inspectModels: (context.testMaintenance as any).inspectRequestedModels as (request: unknown, background: boolean) => Promise<void>, ackDesktopInput: (context.testMaintenance as any).ackDesktopInput as (...args: string[]) => Promise<any>, drainCommandAcks: (context.testMaintenance as any).drainCommandAcks as () => Promise<any>, desktopInput: (context.testMaintenance as any).desktopInput as (...args: any[]) => Promise<any>, events: (context.testMaintenance as any).events as (message: any, sender: any, source: any) => Promise<any>, create, sendMessage, tabs, fetch, windows, remove, reload, executeScript, insertCSS, local, localSaved, saved };
+  return { ...api, update, get, inspectModels: (context.testMaintenance as any).inspectRequestedModels as (request: unknown, background: boolean) => Promise<void>, ackDesktopInput: (context.testMaintenance as any).ackDesktopInput as (...args: string[]) => Promise<any>, drainCommandAcks: (context.testMaintenance as any).drainCommandAcks as () => Promise<any>, desktopInput: (context.testMaintenance as any).desktopInput as (...args: any[]) => Promise<any>, events: (context.testMaintenance as any).events as (message: any, sender: any, source: any) => Promise<any>, create, sendMessage, tabs, fetch, windows, remove, reload, executeScript, insertCSS, local, localSaved, saved };
 }
 
 describe('one browser maintenance flight per desktop outbox publication', () => {
@@ -962,8 +968,11 @@ it('reveals only the explicitly selected existing worker chat, without opening a
     { id: 3, windowId: 7, url: `https://chatgpt.com/c/${secondId}`, active: true });
   h.saved.chatBackgroundWindow = 80; h.saved.chatBackgroundTabs = [1, 2];
   await (h as any).revealWorkerChat({ id: 'explicit-reveal', conversationId: secondId });
-  expect(h.update).toHaveBeenCalledExactlyOnceWith(2, { active: true });
-  expect(h.windows.update).toHaveBeenCalledExactlyOnceWith(80, { state: 'normal', focused: true });
+  expect(h.windows.create).toHaveBeenCalledExactlyOnceWith({ tabId: 2, type: 'normal', focused: true });
+  expect(h.tabs.find(tab => tab.id === 2)?.windowId).toBe(81);
+  expect(h.tabs.find(tab => tab.id === 1)?.windowId).toBe(80);
+  expect(h.saved.chatBackgroundTabs).toEqual([1]);
+  expect(h.windows.update).not.toHaveBeenCalled();
   expect(h.create).not.toHaveBeenCalled();
   const ack = h.fetch.mock.calls.find(([url]) => new URL(url).pathname === '/browser/worker-reveal');
   expect(JSON.parse(String(ack?.[1]?.body))).toMatchObject({ id: 'explicit-reveal', conversationId: secondId, ok: true });
@@ -976,11 +985,17 @@ it.each(['absent', 'duplicate', 'mixed-window', 'navigated'])('fails exact revea
   if (reason === 'absent') h.tabs.length = 0;
   if (reason === 'duplicate') h.tabs.push({ id: 2, windowId: 80, url: `https://chatgpt.com/c/${firstId}` });
   if (reason === 'mixed-window') h.tabs.push({ id: 2, windowId: 80, url: 'https://example.com/private' });
-  if (reason === 'navigated') h.update.mockImplementation(async () => {
-    const tab = h.tabs[0]!; tab.url = 'https://example.com/private'; return tab;
-  });
+  if (reason === 'navigated') {
+    let reads = 0;
+    h.get.mockImplementation(async () => {
+      const tab = h.tabs[0]!;
+      if (++reads === 4) tab.url = 'https://example.com/private';
+      return tab;
+    });
+  }
   await (h as any).revealWorkerChat({ id: 'explicit-reveal', conversationId: firstId });
   expect(h.windows.update).not.toHaveBeenCalled();
+  expect(h.windows.create).not.toHaveBeenCalled();
   expect(h.create).not.toHaveBeenCalled();
   const ack = h.fetch.mock.calls.find(([url]) => new URL(url).pathname === '/browser/worker-reveal');
   expect(JSON.parse(String(ack?.[1]?.body))).toMatchObject({ ok: false });
@@ -1000,9 +1015,10 @@ it('reports a refused isolated worker window immediately and never falls back to
 });
 
 
-it.each([null, secondId])('keeps active personal browsing untouched for desktop task target=%s', async conversationId => {
+it('keeps active personal browsing untouched for a new desktop chat', async () => {
+  const conversationId = null;
   const h = await worker([{ id: firstId, conversationId }]);
-  const personalUrl = conversationId ? `https://chatgpt.com/c/${conversationId}` : 'https://chatgpt.com/';
+  const personalUrl = 'https://chatgpt.com/';
   h.tabs.push({ id: 30, windowId: 3, url: personalUrl, active: true });
   h.fetch.mockImplementation(async input => ({ ok: true, status: 200, json: async () =>
     new URL(input).pathname === '/hello' ? { app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true }
@@ -1014,6 +1030,21 @@ it.each([null, secondId])('keeps active personal browsing untouched for desktop 
   expect(h.update.mock.calls.some(([id]) => id === 30)).toBe(false);
   expect(h.remove).not.toHaveBeenCalledWith(30);
   expect(h.create).toHaveBeenCalledTimes(1);
+});
+
+it('does not duplicate an existing non-isolated chat when delivering desktop input', async () => {
+  const h = await worker([{ id: firstId, conversationId: secondId }]);
+  const personal = { id: 30, windowId: 3, url: `https://chatgpt.com/c/${secondId}`, active: true };
+  h.tabs.push(personal);
+  h.fetch.mockImplementation(async input => ({ ok: true, status: 200, json: async () =>
+    new URL(input).pathname === '/hello' ? { app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true }
+      : { ok: true, inputs: [{ id: firstId, conversationId: secondId }], background: false } }));
+  await h.maintain(); await h.maintain();
+  expect(h.create).not.toHaveBeenCalled();
+  expect(h.windows.create).not.toHaveBeenCalled();
+  expect(h.remove).not.toHaveBeenCalled();
+  expect(h.fetch.mock.calls.some(([url]) => new URL(url).pathname === '/input/background-failed')).toBe(true);
+  expect(h.tabs.find(tab => tab.id === 30)).toEqual(personal);
 });
 
 it('rechecks native isolation for both desktop input claim and final Send authorization', async () => {

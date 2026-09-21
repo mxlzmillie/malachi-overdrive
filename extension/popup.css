@@ -610,6 +610,31 @@ input:focus-visible + .track {
   margin-top: 12px;
 }
 
+.recovery-action {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.recovery-action[hidden] { display: none; }
+.recovery-action p { margin: 0 0 9px; }
+.recovery-action button {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--hollow);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--text);
+  font: 500 12.5px/1 var(--sans);
+  cursor: pointer;
+}
+.recovery-action button:disabled { opacity: .45; cursor: default; }
+.recovery-action #recoveryResult { margin: 8px 0 0; }
+.recovery-action #recoveryResult:empty { display: none; }
+
 .actions button {
   flex: 1 1 0;
   min-height: 36px;

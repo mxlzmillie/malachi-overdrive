@@ -20,6 +20,7 @@ let overwriteEnabled = true;
 let showTimes = false;
 let latest = { status: null, tab: null };
 let openedOnFailure = false;
+let recoveryBusy = false;
 
 // ------------------------------------------------------------------ formatting
 
@@ -353,6 +354,10 @@ async function refresh() {
 
   paintAlert(status, info);
   paintDetails(status, info);
+  const recoverable = Boolean(ready && info?.isChat && info.conversationId &&
+    Number.isInteger(info.tab) && Number.isInteger(info.windowId) && info.url && !info.isolated);
+  $('recoveryAction').hidden = !recoverable;
+  $('recoverChatBtn').disabled = recoveryBusy || !info?.recorder || info?.page?.generating === true;
 }
 
 // -------------------------------------------------------------------- controls
@@ -403,6 +408,27 @@ $('more').addEventListener('toggle', () => paintDetails(latest.status, latest.ta
 $('reloadBtn').addEventListener('click', () => {
   // The old worker may be stuck: this explicit action belongs to the popup itself.
   chrome.runtime.reload();
+});
+
+$('recoverChatBtn').addEventListener('click', async () => {
+  const info = latest.tab;
+  if (recoveryBusy || !info?.isChat || !info.conversationId || !Number.isInteger(info.tab) ||
+      !Number.isInteger(info.windowId) || !info.url || info.isolated) return;
+  recoveryBusy = true;
+  $('recoverChatBtn').disabled = true;
+  $('recoveryResult').textContent = 'Checking this chat…';
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'recoverSelectedChat',
+      tab: info.tab, windowId: info.windowId, conversationId: info.conversationId, url: info.url });
+    $('recoveryResult').textContent = result?.ok === true
+      ? 'This chat is reconnected to MALACHI OVERDRIVE.'
+      : String(result?.error || 'Could not reconnect this chat. Try again when it is idle.');
+  } catch {
+    $('recoveryResult').textContent = 'The companion could not reach this chat. Try again when it is idle.';
+  } finally {
+    recoveryBusy = false;
+    await refresh().catch(() => undefined);
+  }
 });
 
 $('retryBtn').addEventListener('click', async () => {

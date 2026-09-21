@@ -1547,6 +1547,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (accepted) pending.finish(body.ok === true && await appOwnsConversation(pending.conversationId));
     return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
   }
+  if (route === '/browser/recovery-ownership' && req.method === 'POST') {
+    const body = await readBody(req) as { conversationId?: unknown };
+    const id = conversationId(body?.conversationId);
+    if (!id) return json(res, 400, { ok: false, error: 'invalid_conversation' }, origin);
+    // The popup's deliberate selection is physical-tab authority. The app supplies only
+    // durable task identity; an ordinary recorded personal chat must not become a worker.
+    const session = await findSessionByConversation(id, { requireUnique: true });
+    const ok = Boolean(session && await appOwnsConversation(id));
+    return json(res, ok ? 200 : 409, { ok }, origin);
+  }
   if (route === '/commands/background-failed' && req.method === 'POST') {
     const body = await readBody(req) as { id?: string };
     const command = commands.find(entry => entry.id === body?.id && entry.owner === null &&

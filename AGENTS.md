@@ -19,9 +19,10 @@ it architecturally cleaner and preferably smaller than before.
 alarm are not permission to open a tab. Reuse a suitable existing document. One operation owns
 one elected tab across provider navigation and MV3 suspension; a missing receipt or a user-closed
 tab must not create a new opening attempt. Transfer opening authority at handout, not after page
-hydration. Keep waiting chats and reusable sleeping workers open for follow-ups. Only terminal,
-blocked or superseded conversations and proven duplicates grant tab-close authority,
-subject to the existing draft/generation/document checks.
+hydration. Keep a bounded pool of quiet waiting chats and reusable sleeping workers for fast
+follow-ups; retain their durable conversation identity when an idle document retires. Terminal,
+blocked and superseded conversations, proven duplicates, or excess quiet app-owned documents
+grant tab-close authority, subject to the existing draft/generation/document checks.
 Read bounded account-evaluated model metadata and installed tool declarations through the existing
 MAIN-world bridge. Do not infer availability from English labels or fixed release names, sweep every
 effort to discover a catalog, or add polling/fallback openers around an uncertain observation.
@@ -2178,13 +2179,18 @@ service worker restores `autoDiscardable:true` only for markers it owns. A tab a
 the user/browser is never claimed and therefore never “restored” behind their back. Sleeping and
 terminal workers are not protected.
 
-**Tab closing requires terminal authority.** `bridge.ts::browserTabPolicy()` retains waiting
-ordinary chats and reusable sleeping workers, regardless of worker-slot capacity or idle time.
-Two minutes of inactivity permits retirement only for terminal non-revivable workers, blocked
-chats and cancelled dedicated work. A late-confirmed cancelled desktop new-chat send may retire,
-but a later delivered follow-up supersedes that cancellation. Superseded sources and redundant
-document copies remain separately eligible. Fresh document, journal, draft and generation checks
-still gate every close. Task windows are created already minimized, without a foreground-create
+**Tab closing requires exact app ownership and current page proof.** `bridge.ts::browserTabPolicy()`
+protects active work and pending sends. `background.js::pruneManagedTabs()` retains the newest
+eight app-owned, unprotected chats that have been quiet for at least 60 seconds, whether ordinary
+or sleeping workers; their durable session and revival authority survive a safe tab retirement.
+Terminal non-revivable workers, blocked chats and cancelled dedicated work become eligible after
+two minutes of inactivity. A late-confirmed cancelled desktop new-chat send may retire, but a
+later delivered follow-up supersedes that cancellation. Superseded sources and redundant document
+copies remain separately eligible. Fresh document, journal, draft and generation checks still gate
+every close. App-owned root/helper tabs with an exact terminal operation marker may retire after
+a 60-second first-observed terminal grace, provided a fresh page proof confirms no draft, send or
+generation; the model catalog keeps its elected warm helper. Task windows are created already
+minimized, without a foreground-create
 or create-then-minimize fallback. If the browser cannot supply an isolated background surface,
 delivery fails with `BACKGROUND_UNAVAILABLE`; it never opens an OS browser as a substitute.
 Existing owned background windows are reused without changing their state or geometry; a
@@ -2195,6 +2201,9 @@ never adopt a restored minimized window just because it contains an app conversa
 window/tab ownership cannot be proven, return `BACKGROUND_UNAVAILABLE` and retain task history;
 do not declare completion, replay a send or silently open a replacement. Only a fresh durable
 opening intent whose send checkpoints still authorize creation may create a new isolated tab.
+The companion popup may explicitly reattach the one ChatGPT tab the user has selected after an
+app-side unique session check and a current idle/no-draft page proof. It moves that same tab to a
+minimized app-owned window, records the exact new physical IDs, and never replays an uncertain send.
 Model discovery retains its elected empty helper and transfers that exact tab to the first
 authored input after fresh empty-document proof. The old discovery owner records that handout,
 so a user-closed or navigated helper cannot regain opening authority. Browser process count is

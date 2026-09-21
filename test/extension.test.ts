@@ -1340,6 +1340,84 @@ describe('app-owned retained tab pool', () => {
     const worker = await budget({ safe: n => n !== 3 && n !== 4, changed: 5, retired: true });
     expect(worker.tabsRemove.mock.calls.map(call => call[0])).toEqual([2]);
   });
+  it('bounds quiet app-owned chats while keeping live work, drafts, and personal tabs', async () => {
+    const now = Date.now();
+    const chats = Array.from({ length: 14 }, (_, offset) => ({
+      id: offset + 1,
+      windowId: offset === 13 ? 9 : 7,
+      url: `https://chatgpt.com/c/${id(offset + 1)}`
+    }));
+    const protectedChat = id(1);
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea({
+        chatBackgroundWindow: 7,
+        chatBackgroundTabs: chats.filter(tab => tab.windowId === 7).map(tab => tab.id),
+        tabDocuments: Object.fromEntries(chats.map(tab => [tab.id, `doc-${tab.id}`])),
+        tabEpochs: Object.fromEntries(chats.map(tab => [tab.id, 0]))
+      }),
+      fetch: async input => response(200, new URL(input).pathname === '/hello'
+        ? { app: 'chat-on-steroids', paired: true }
+        : {
+            ok: true, repairs: [], managedConversations: chats.map(tab => tab.url.split('/c/')[1]),
+            nonDiscardableConversations: [protectedChat],
+            conversationActivityAt: Object.fromEntries(chats.map(tab => [tab.url.split('/c/')[1], now - 120_000 + tab.id]))
+          }),
+      tabsQuery: async () => chats,
+      windowsGet: async () => ({ id: 7, state: 'minimized', focused: false }),
+      tabsGet: async tabId => chats.find(tab => tab.id === tabId)!,
+      tabsSendMessage: async tabId => ({ safe: tabId !== 3, navigationEpoch: 0,
+        conversationId: chats.find(tab => tab.id === tabId)!.url.split('/c/')[1] })
+    });
+    worker.tabsRemove.mockImplementation(async (tabId: number) => {
+      const index = chats.findIndex(tab => tab.id === tabId);
+      if (index >= 0) chats.splice(index, 1);
+    });
+    await worker.fireAlarm();
+    await worker.fireAlarm();
+    // The oldest quiet document has a draft, so the next pass retires another
+    // proven-empty chat. Neither the live chat nor the personal window is in the pool.
+    expect(worker.tabsRemove.mock.calls.map(call => call[0]).sort((a, b) => a - b)).toEqual([2, 4, 5, 6]);
+    expect(worker.tabsRemove).not.toHaveBeenCalledWith(1);
+    expect(worker.tabsRemove).not.toHaveBeenCalledWith(3);
+    expect(worker.tabsRemove).not.toHaveBeenCalledWith(14);
+  });
+  it('limits simultaneous close proofs even when a restored profile has 100 quiet tabs', async () => {
+    const now = Date.now();
+    const chats = Array.from({ length: 100 }, (_, offset) => ({
+      id: offset + 1, windowId: 7, url: `https://chatgpt.com/c/${id(offset + 1)}`
+    }));
+    let inFlight = 0;
+    let peak = 0;
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea({
+        chatBackgroundWindow: 7,
+        chatBackgroundTabs: chats.map(tab => tab.id),
+        tabDocuments: Object.fromEntries(chats.map(tab => [tab.id, `doc-${tab.id}`])),
+        tabEpochs: Object.fromEntries(chats.map(tab => [tab.id, 0]))
+      }),
+      fetch: async input => response(200, new URL(input).pathname === '/hello'
+        ? { app: 'chat-on-steroids', paired: true }
+        : { ok: true, repairs: [], managedConversations: chats.map(tab => tab.url.split('/c/')[1]),
+            conversationActivityAt: Object.fromEntries(chats.map(tab => [tab.url.split('/c/')[1], now - 120_000])) }),
+      tabsQuery: async () => chats,
+      windowsGet: async () => ({ id: 7, state: 'minimized', focused: false }),
+      tabsGet: async tabId => chats.find(tab => tab.id === tabId)!,
+      tabsSendMessage: async (tabId, message) => {
+        if (message.type === 'clf-tab-close-check') {
+          peak = Math.max(peak, ++inFlight);
+          await new Promise(resolve => setTimeout(resolve, 1));
+          inFlight--;
+        }
+        return { safe: true, navigationEpoch: 0,
+          conversationId: chats.find(tab => tab.id === tabId)!.url.split('/c/')[1] };
+      }
+    });
+    await worker.fireAlarm();
+    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBeLessThanOrEqual(16);
+  });
 });
 
 describe('worker settings authority', () => {

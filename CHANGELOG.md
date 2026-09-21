@@ -11,23 +11,22 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
-## [2.0.23] — 2026-09-19
+## [2.0.23] — 2026-09-21
 
-- Hardened Ambient Work Mode around exact task ownership, truthful activity and explicit recovery.
-- Kept background worker isolation independent of ordinary chat-opening preferences and preserved
-  explicit model and reasoning requirements.
-- Expanded the compact activity preview and retained the full Control Rail as an explicit action.
-- Made the owned Windows UI Automation release fixture override the launcher-inherited hidden state
-  after its first show, initialize its exact known child control, and then exercise the unchanged
-  production UIA traversal without foreground or timing assumptions.
+- Preserved sibling tasks in their isolated window when revealing one chat, and kept ownership of
+  still-open tabs through long helper-tab churn.
+- Added an explicit companion action to reconnect one selected task chat after a browser restart
+  without opening a duplicate or replaying an uncertain message.
+- Bounded quiet app-owned chat tabs and retired abandoned empty helpers only after fresh page proof.
+- Kept the Windows ARM cold-start allowance shipped in 2.0.22 and made the owned UI Automation
+  release test accept the provider's actual role while still checking exact control identity.
 
 See [the full release notes](docs/release-notes/v2.0.23.md).
 
-## [2.0.22] — 2026-09-19 (unpublished candidate)
+## [2.0.22] — 2026-09-20
 
-- Release publication was blocked because the owned WinForms UI Automation fixture inherited the
-  Windows hidden-startup state on both Windows runners; no 2.0.22 GitHub release was created. Its
-  product changes are carried forward into 2.0.23.
+- Published Ambient Work Mode with the compact activity preview and Control Rail, an isolated
+  browser placement path, and the Windows ARM helper cold-start fix.
 
 ## [2.0.21] — 2026-09-19 (unpublished candidate)
 

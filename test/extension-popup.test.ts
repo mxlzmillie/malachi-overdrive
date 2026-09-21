@@ -85,3 +85,20 @@ it('keeps blocked delivery distinct from network unreachability and requires pai
   expect(result.why[1]).toContain('protocol compatibility');
   expect(result.why[1]).not.toContain('not reachable');
 });
+
+it('offers exact-tab recovery only on a user click for an unisolated chat', async () => {
+  const info = { tab: 7, windowId: 8, isChat: true, url: 'https://chatgpt.com/c/task',
+    conversationId: 'task', isolated: false, recorder: true, page: { generating: false, events: 0 } };
+  const sendMessage = vi.fn(async (message: any) => message.type === 'status'
+    ? { connected: true, paired: true, compatible: true, port: 8765 }
+    : message.type === 'tabStatus' ? info : { ok: true });
+  const document = openPopup(vi.fn(), sendMessage);
+  await vi.waitFor(() => expect((document.getElementById('recoveryAction') as HTMLElement).hidden).toBe(false));
+  expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'recoverSelectedChat' }));
+  document.getElementById('recoverChatBtn')!.click();
+  await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({
+    type: 'recoverSelectedChat', tab: 7, windowId: 8,
+    conversationId: 'task', url: 'https://chatgpt.com/c/task'
+  }));
+  await vi.waitFor(() => expect(document.getElementById('recoveryResult')!.textContent).toContain('reconnected'));
+});

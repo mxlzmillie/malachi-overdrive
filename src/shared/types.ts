@@ -226,13 +226,15 @@ export type GoalBackend = 'api' | 'chatgpt' | 'templates';
 /**
  * Where the Goal/Loop second model runs when the backend is `api`.
  *
- * `openrouter` is the shipped default: OpenRouter's catalogue, key and routing. `atxp` uses
- * ATXP's OpenAI-compatible LLM Gateway with the user's own connection string. `custom`
+ * `openrouter` is the shipped default: OpenRouter's catalogue, key and routing. `kilo` uses
+ * Kilo's anonymous free-model gateway without a key; project chat history goes to that third
+ * party only after the person selects it. `atxp` uses ATXP's OpenAI-compatible LLM Gateway
+ * with the user's own connection string. `custom`
  * points at any OpenAI-compatible `/chat/completions` endpoint the user runs themselves
  * (Ollama, vLLM, LM Studio, a gateway) and is used with that endpoint's own model id.
  * The other backends (`chatgpt`, `templates`) never read this block.
  */
-export const GOAL_PROVIDERS = ['openrouter', 'atxp', 'custom'] as const;
+export const GOAL_PROVIDERS = ['openrouter', 'kilo', 'atxp', 'custom'] as const;
 export type GoalProviderKind = (typeof GOAL_PROVIDERS)[number];
 
 export interface GoalProviderSettings {

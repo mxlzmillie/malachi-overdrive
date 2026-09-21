@@ -11,7 +11,21 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
-## [2.0.23] — 2026-09-21
+## [2.0.24] — 2026-09-21
+
+- Added an explicit no-account, no-key Kilo Free source for Goal and Loop, with a live check that
+  the chosen model is still free before conversation text leaves the app. The setup explains
+  third-party routing, possible prompt retention/training and changing provider limits.
+- Added a filtered view of compatible, currently zero-priced OpenRouter models. OpenRouter still
+  requires its own API key for Goal and Loop requests.
+- Carried forward the background browser reliability changes prepared in the unpublished 2.0.23
+  candidate: isolated task tabs, explicit restart recovery and bounded idle app-owned tabs.
+
+See [the full release notes](docs/release-notes/v2.0.24.md).
+
+## [2.0.23] — 2026-09-21 (unpublished candidate)
+
+No 2.0.23 GitHub release was created. The changes below are included in 2.0.24.
 
 - Preserved sibling tasks in their isolated window when revealing one chat, and kept ownership of
   still-open tabs through long helper-tab churn.

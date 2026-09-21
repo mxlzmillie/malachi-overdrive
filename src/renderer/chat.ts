@@ -43,6 +43,7 @@ import {
 import { chronological } from '../shared/chronology.js';
 import {
   DEFAULT_GOAL_MODEL,
+  KILO_DEFAULT_MODEL,
   DEFAULT_GOAL_LOOP_SYSTEM_PROMPT,
   DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT,
   DEFAULT_GOAL_SYSTEM_PROMPT,
@@ -2417,10 +2418,11 @@ export function chatSettingsPatch(current: Config): {
       model: (() => {
         const provider = $<HTMLSelectElement>('goalProvider').value;
         if (provider === 'custom') return $<HTMLInputElement>('goalCustomModel').value.trim() || current.goal.model;
-        if (provider === 'atxp') return goalModelByProvider.atxp;
-        return goalModelByProvider.openrouter;
+        return provider === 'atxp' ? goalModelByProvider.atxp
+          : provider === 'kilo' ? goalModelByProvider.kilo : goalModelByProvider.openrouter;
       })(),
-      reasoning: $<HTMLSelectElement>('goalReasoning').value as Config['goal']['reasoning'],
+      reasoning: $<HTMLSelectElement>('goalProvider').value === 'kilo'
+        ? 'default' : $<HTMLSelectElement>('goalReasoning').value as Config['goal']['reasoning'],
       // Blank means "restore the safe default", not "send an unconstrained system message".
       prompt: $<HTMLTextAreaElement>('goalPrompt').value.trim() || DEFAULT_GOAL_SYSTEM_PROMPT,
       objectivePrompt:
@@ -2443,17 +2445,31 @@ export function chatSettingsPatch(current: Config): {
  * loaded most of the time: an `<input>` would have to hold an id nobody typed, and a
  * `<select>` would have to hold several hundred options nobody asked for.
  */
-type GoalCatalogProvider = 'openrouter' | 'atxp';
+type GoalCatalogProvider = 'openrouter' | 'kilo' | 'atxp';
 /** Each hosted catalogue owns its own selection; switching providers never reinterprets an id from the other one. */
 const goalModelByProvider: Record<GoalCatalogProvider, string> = {
   openrouter: DEFAULT_GOAL_MODEL,
+  kilo: KILO_DEFAULT_MODEL,
   atxp: ATXP_DEFAULT_MODEL
 };
 /** The catalogue as far as it has been paged in, and how long it actually is. */
-let goalModels: Array<{ id: string; name: string; created: number; contextLength: number }> = [];
+let goalModels: Array<{ id: string; name: string; created: number; contextLength: number; free: boolean; mayTrainOnYourPrompts?: boolean }> = [];
 let goalModelsProvider: GoalCatalogProvider | null = null;
+let goalModelsFreeOnly = false;
 let goalTotal = 0;
 let goalLoading = false;
+let goalCatalogRevision = 0;
+let goalModelsFetchedAt = 0;
+const GOAL_MODEL_VIEW_TTL_MS = 5 * 60_000;
+
+function resetGoalModels(): void {
+  goalModels = [];
+  goalTotal = 0;
+  goalModelsProvider = null;
+  goalModelsFetchedAt = 0;
+  goalCatalogRevision++;
+  $('goalModelList').textContent = '';
+}
 
 /** The release date OpenRouter publishes, as a person would date a model. */
 function releasedOn(created: number): string {
@@ -2468,19 +2484,31 @@ function releasedOn(created: number): string {
  * the question this list answers — what is new — is answered by the first screen of it.
  */
 async function loadGoalModels(reset: boolean): Promise<void> {
-  if (goalLoading) return;
-  const provider = $<HTMLSelectElement>('goalProvider').value === 'atxp' ? 'atxp' : 'openrouter';
-  goalLoading = true;
-  if (reset || goalModelsProvider !== provider) {
+  const selected = $<HTMLSelectElement>('goalProvider').value;
+  const provider: GoalCatalogProvider = selected === 'atxp' ? 'atxp' : selected === 'kilo' ? 'kilo' : 'openrouter';
+  const freeOnly = provider === 'kilo' || (provider === 'openrouter' && $<HTMLInputElement>('goalFreeOnly').checked);
+  if (reset || goalModelsProvider !== provider || goalModelsFreeOnly !== freeOnly) {
     goalModels = [];
     goalTotal = 0;
+    goalModelsFetchedAt = 0;
     goalModelsProvider = provider;
+    goalModelsFreeOnly = freeOnly;
+    goalCatalogRevision++;
+    $('goalModelList').textContent = '';
   }
-  const providerLabel = provider === 'atxp' ? 'ATXP' : 'OpenRouter';
-  $('goalModelsState').textContent = `Loading models from ${providerLabel}…`;
+  if (goalLoading) return;
+  const revision = goalCatalogRevision;
+  goalLoading = true;
+  const providerLabel = provider === 'atxp' ? 'ATXP' : provider === 'kilo' ? 'Kilo Free' : 'OpenRouter';
+  $('goalModelsState').textContent = `Loading ${freeOnly ? 'free ' : ''}models from ${providerLabel}…`;
   $<HTMLButtonElement>('goalMore').disabled = true;
-  const page = await run(api.listGoalModels(goalModels.length));
+  const offset = goalModels.length;
+  const page = await run(api.listGoalModels(offset, freeOnly, provider === 'kilo' ? 'kilo' : undefined));
   goalLoading = false;
+  if (revision !== goalCatalogRevision) {
+    if (!$('goalModels').hidden) void loadGoalModels(false);
+    return;
+  }
   if (!page) {
     // `run` has already shown the reason. Say what it means *here*: the list is empty and
     // the model in use has not changed.
@@ -2489,6 +2517,7 @@ async function loadGoalModels(reset: boolean): Promise<void> {
     return;
   }
   goalModels = [...goalModels, ...page.models];
+  if (offset === 0) goalModelsFetchedAt = Date.now();
   goalTotal = page.total;
   paintGoalModels();
 }
@@ -2507,7 +2536,7 @@ function paintGoalModels(): void {
     row.dataset.model = model.id;
     if (goalModelsProvider && model.id === goalModelByProvider[goalModelsProvider]) row.dataset.chosen = '1';
     row.append(el('b', 'goal-model-name', model.name));
-    const meta = [releasedOn(model.created), model.contextLength > 0 ? `${compactNumber(model.contextLength)} ctx` : '']
+    const meta = [model.free ? 'Free' : '', model.mayTrainOnYourPrompts ? 'May train on prompts' : '', releasedOn(model.created), model.contextLength > 0 ? `${compactNumber(model.contextLength)} ctx` : '']
       .filter(Boolean)
       .join(' · ');
     row.append(el('em', 'goal-model-meta', `${model.id} · ${meta}`));
@@ -2515,7 +2544,9 @@ function paintGoalModels(): void {
   }
   const shown = goalModels.length;
   $('goalModelsState').textContent =
-    shown === 0 ? 'No models came back.' : `Showing the ${shown} newest of ${goalTotal}, newest release first.`;
+    shown === 0
+      ? (goalModelsFreeOnly ? 'No compatible free models are available right now.' : 'No models came back.')
+      : `Showing ${shown} of ${goalTotal} ${goalModelsFreeOnly ? 'currently free ' : ''}models, newest release first.`;
   $<HTMLButtonElement>('goalMore').disabled = shown >= goalTotal;
   $<HTMLButtonElement>('goalMore').hidden = shown >= goalTotal;
   list.scrollTop = keep;
@@ -2569,10 +2600,14 @@ function applyGoal(state: AppState, previous?: Config): void {
   // Hosted providers each own one remembered model. Custom deployments use their own
   // text field and never overwrite either hosted selection during unrelated repaints.
   const configuredProvider = config.goal.provider?.kind ?? 'openrouter';
-  if (configuredProvider === 'openrouter' || configuredProvider === 'atxp') {
+  if (configuredProvider === 'openrouter' || configuredProvider === 'atxp' || configuredProvider === 'kilo') {
     goalModelByProvider[configuredProvider] = config.goal.model;
   }
   applyChatValue($<HTMLSelectElement>('goalReasoning'), config.goal.reasoning, previous?.goal.reasoning);
+  // Kilo's anonymous chat endpoint does not advertise reasoning_effort; expose only
+  // provider-selected reasoning instead of offering a control the request cannot honor.
+  $<HTMLSelectElement>('goalReasoning').disabled = config.goal.provider?.kind === 'kilo';
+  if (config.goal.provider?.kind === 'kilo') $<HTMLSelectElement>('goalReasoning').value = 'default';
   applyChatValue($<HTMLTextAreaElement>('goalPrompt'), config.goal.prompt, previous?.goal.prompt);
   applyChatValue($<HTMLTextAreaElement>('mcpInstructions'), config.mcp?.instructions ?? '', previous?.mcp?.instructions);
   applyChatValue(
@@ -2589,13 +2624,11 @@ function applyGoal(state: AppState, previous?: Config): void {
   // OpenRouter: a custom endpoint is often keyless, so a missing key never means custom.
   const customProvider = config.goal.provider?.kind === 'custom';
   const atxpProvider = config.goal.provider?.kind === 'atxp';
+  const kiloProvider = config.goal.provider?.kind === 'kilo';
   const providerBaseUrl = config.goal.provider?.baseUrl ?? '';
-  const catalogProvider = atxpProvider ? 'atxp' : customProvider ? null : 'openrouter';
+  const catalogProvider = atxpProvider ? 'atxp' : kiloProvider ? 'kilo' : customProvider ? null : 'openrouter';
   if (goalModelsProvider !== null && catalogProvider !== goalModelsProvider) {
-    goalModels = [];
-    goalTotal = 0;
-    goalModelsProvider = catalogProvider;
-    $('goalModelList').textContent = '';
+    resetGoalModels();
   }
   applyChatValue($<HTMLSelectElement>('goalProvider'), config.goal.provider?.kind ?? 'openrouter', previous?.goal.provider?.kind);
   applyChatValue($<HTMLInputElement>('goalBaseUrl'), providerBaseUrl, previous?.goal.provider?.baseUrl);
@@ -2603,9 +2636,16 @@ function applyGoal(state: AppState, previous?: Config): void {
   $('goalCustomPanel').hidden = !customProvider;
   $('goalPickerRow').hidden = customProvider;
   if (customProvider) $('goalModels').hidden = true;
-  $('goalKeyField').hidden = customProvider || atxpProvider;
+  $('goalKeyField').hidden = customProvider || atxpProvider || kiloProvider;
+  $('goalFreeSource').hidden = customProvider || atxpProvider || kiloProvider;
+  $('goalFreeFilter').hidden = customProvider || atxpProvider || kiloProvider;
   $('goalAtxpPanel').hidden = !atxpProvider;
   $('goalModelName').textContent = config.goal.model;
+  $('goalKeylessState').textContent = kiloProvider
+    ? config.goal.backend === 'api' && config.goal.loopBackend === 'api'
+      ? `Selected: ${config.goal.model} uses Kilo Free for Goal and Loop without an API key. Free availability is checked when used.`
+      : 'Kilo Free is selected. Use the button above to enable it for Goal and Loop.'
+    : '';
   const goalKey = $<HTMLInputElement>('goalKey');
   goalKey.placeholder = state.hasGoalKey ? '•••••••• stored' : 'sk-or-v1-…';
   goalKey.disabled = !secureStorageAvailable;
@@ -2682,19 +2722,81 @@ function wireGoal(save: () => Promise<void>): void {
     const panel = $('goalModels');
     panel.hidden = !panel.hidden;
     $('goalPick').textContent = panel.hidden ? 'Select model' : 'Close';
-    if (!panel.hidden && goalModels.length === 0) void loadGoalModels(true);
+    if (!panel.hidden && (goalModels.length === 0 || Date.now() - goalModelsFetchedAt >= GOAL_MODEL_VIEW_TTL_MS)) void loadGoalModels(true);
+  });
+  $('goalUseKeyless').addEventListener('click', async () => {
+    const button = $<HTMLButtonElement>('goalUseKeyless');
+    if (button.disabled) return;
+    const provider = $<HTMLSelectElement>('goalProvider');
+    const previous = provider.value;
+    const revision = goalCatalogRevision;
+    button.disabled = true;
+    $('goalKeylessState').textContent = 'Checking currently free models…';
+    try {
+      // Read only a fixed public catalogue before changing any live API source. If Goal is
+      // already running, a temporary provider switch could transmit its transcript.
+      const page = await run(api.listGoalModels(0, true, 'kilo'));
+      if (provider.value !== previous || revision !== goalCatalogRevision) return;
+      const selected = page?.models.find(model => model.id === KILO_DEFAULT_MODEL && model.free)
+        ?? page?.models.find(model => model.free);
+      if (!selected) {
+        $('goalKeylessState').textContent = 'No compatible free model is available right now. Your previous source is unchanged.';
+        return;
+      }
+      provider.value = 'kilo';
+      goalModelByProvider.kilo = selected.id;
+      $<HTMLSelectElement>('goalBackend').value = 'api';
+      $<HTMLSelectElement>('loopBackend').value = 'api';
+      $<HTMLSelectElement>('goalReasoning').value = 'default';
+      await save();
+      if (deps.state()?.config.goal.provider.kind === 'kilo' && deps.state()?.config.goal.model === selected.id) {
+        toast(`${selected.name} is ready for Goal and Loop without an API key`);
+      }
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $('goalPickFree').addEventListener('click', async () => {
+    if ($<HTMLSelectElement>('goalProvider').value !== 'openrouter') return;
+    // A provider change can still be saving while the user opens this catalogue.
+    await save();
+    const filter = $<HTMLInputElement>('goalFreeOnly');
+    filter.checked = true;
+    $('goalModels').hidden = false;
+    $('goalPick').textContent = 'Close';
+    void loadGoalModels(true);
+  });
+  $('goalFreeOnly').addEventListener('change', () => {
+    if (!$('goalModels').hidden) void loadGoalModels(true);
+    else resetGoalModels();
+  });
+  $('goalProvider').addEventListener('change', () => {
+    const kilo = $<HTMLSelectElement>('goalProvider').value === 'kilo';
+    $<HTMLSelectElement>('goalReasoning').disabled = kilo;
+    if (kilo) $<HTMLSelectElement>('goalReasoning').value = 'default';
+    $('goalModels').hidden = true;
+    $('goalPick').textContent = 'Select model';
+    resetGoalModels();
   });
   $('goalMore').addEventListener('click', () => void loadGoalModels(false));
   $('goalModelList').addEventListener('scroll', maybePageGoalModels);
   $('goalModelList').addEventListener('click', (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-model]');
     if (!row?.dataset.model) return;
-    const provider: GoalCatalogProvider = $<HTMLSelectElement>('goalProvider').value === 'atxp' ? 'atxp' : 'openrouter';
+    const selectedProvider = $<HTMLSelectElement>('goalProvider').value;
+    const provider: GoalCatalogProvider = selectedProvider === 'atxp' ? 'atxp' : selectedProvider === 'kilo' ? 'kilo' : 'openrouter';
     goalModelByProvider[provider] = row.dataset.model;
     $('goalModelName').textContent = row.dataset.model;
+    const activateFree = goalModelsFreeOnly && (provider === 'kilo' || provider === 'openrouter' && !$<HTMLButtonElement>('goalKeyRemove').disabled);
+    if (activateFree) {
+      $<HTMLSelectElement>('goalBackend').value = 'api';
+      $<HTMLSelectElement>('loopBackend').value = 'api';
+    }
     paintGoalModels();
     void save();
-    toast(`Goal model set to ${row.dataset.model}`);
+    toast(activateFree
+      ? `${row.dataset.model} selected for Goal and Loop`
+      : goalModelsFreeOnly ? `Model selected. Add an OpenRouter key to run it in Goal and Loop.` : `Goal model set to ${row.dataset.model}`);
   });
   // On blur, like every other key in this app: not saved keystroke by keystroke, and the
   // field is emptied the moment it has been handed over.
@@ -2711,6 +2813,8 @@ function wireGoal(save: () => Promise<void>): void {
       // Clear only the exact value that successfully crossed the secret-store boundary.
       if (input.value === submitted) input.value = '';
       applyGoal(next);
+      resetGoalModels();
+      if (!$('goalModels').hidden) void loadGoalModels(true);
       toast('OpenRouter key stored');
     }
   });
@@ -2718,6 +2822,8 @@ function wireGoal(save: () => Promise<void>): void {
     const next = await run(api.setGoalKey(''));
     if (next) {
       applyGoal(next);
+      resetGoalModels();
+      if (!$('goalModels').hidden) void loadGoalModels(true);
       toast('OpenRouter key removed');
     }
   });

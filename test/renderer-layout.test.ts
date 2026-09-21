@@ -428,6 +428,12 @@ describe('the settings sheet', () => {
     const listened = /const CHAT_INPUTS[^=]*=\s*\[([^\]]*)\]/.exec(chatSource);
     expect(listened, 'CHAT_INPUTS is gone or renamed').not.toBeNull();
     for (const input of pane.querySelectorAll<HTMLInputElement>('.pane input')) {
+      // The catalogue filter is view state, not a persisted setting. It has its own
+      // listener and must never change the selected Goal model just by toggling.
+      if (input.id === 'goalFreeOnly') {
+        expect(chatSource).toContain("$('goalFreeOnly').addEventListener('change'");
+        continue;
+      }
       if (input.id === 'browserOverwrite' || input.id === 'browserDurations') {
         const variable = input.id === 'browserOverwrite' ? 'overwrite' : 'durations';
         expect(browserPreferencesSource).toContain(`('${input.id}')`);

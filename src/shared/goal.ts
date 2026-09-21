@@ -2,6 +2,8 @@
 export const MAX_GOAL_SYSTEM_PROMPT_CHARS = 20_000;
 /** Default API model, also used when switching back from a custom model namespace. */
 export const DEFAULT_GOAL_MODEL = 'z-ai/glm-5.3';
+/** Tested anonymous Kilo Free Goal/Loop model; live eligibility is still checked before use. */
+export const KILO_DEFAULT_MODEL = 'nex-agi/nex-n2.5-mini:free';
 
 /**
  * All three Goal models are meta-prompters, not reviewers.

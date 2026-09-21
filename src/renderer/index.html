@@ -621,8 +621,8 @@
                 <p id="settingsSearchEmpty" class="muted" role="status" hidden>No settings match your search.</p>
                 <h2 class="settings-section-title">Continuation sources</h2>
                 <div class="pane">
-                  <div class="setting"><span class="setting-text"><b>Goal response source</b><em>API is the most reliable. Offline uses completion markers and 200 prepared messages.</em></span><select id="goalBackend"><option value="api">API key · Most reliable</option><option value="chatgpt">Separate ChatGPT chat</option><option value="templates">Offline · No API cost</option></select></div>
-                  <div class="setting"><span class="setting-text"><b>Loop response source</b><em>Loop keeps going until you switch it off.</em></span><select id="loopBackend"><option value="api">API key · Most reliable</option><option value="chatgpt">Separate ChatGPT chat</option></select></div>
+                  <div class="setting"><span class="setting-text"><b>Goal response source</b><em>API uses the selected provider; the free cloud option needs no key. Offline uses completion markers and 200 prepared messages.</em></span><select id="goalBackend"><option value="api">Selected API provider</option><option value="chatgpt">Separate ChatGPT chat</option><option value="templates">Offline · No API cost</option></select></div>
+                  <div class="setting"><span class="setting-text"><b>Loop response source</b><em>Loop keeps going until you switch it off.</em></span><select id="loopBackend"><option value="api">Selected API provider</option><option value="chatgpt">Separate ChatGPT chat</option></select></div>
                   <div class="setting"><span class="setting-text"><b>Goal, Loop and Plan model</b><em>Model for ChatGPT-generated messages and plans. Select GPT-5.6 and High below for planning.</em></span><select id="helperModel" aria-label="Goal, Loop and Plan model"></select></div>
                   <div class="setting"><span class="setting-text"><b>Goal, Loop and Plan reasoning</b><em>Used with the ChatGPT model above; independent from API reasoning.</em></span><select id="helperReasoning" aria-label="Goal, Loop and Plan reasoning"></select></div>
                   <label class="setting"><span class="setting-text"><b>Include tool details in Goal and handoffs</b><em>Goal receives recorded tool arguments and results. Handoff briefs retain tool details.</em></span><input id="goalIncludeToolCalls" type="checkbox" /></label>
@@ -680,12 +680,20 @@
                   </div>
                 <h2 class="settings-section-title">API provider</h2>
                 <div class="pane">
+                  <div class="field" id="goalKeylessSource">
+                    <label>Free cloud model · no account or API key</label>
+                    <p class="hint">Use Kilo's anonymous free-model gateway for Goal and Loop (and API-based Plan, if enabled). Recorded conversation text, including your messages and assistant replies or progress, goes to Kilo and its model provider. If tool details are enabled above, recorded tool arguments and results go too. Free providers may retain or train on prompts. Do not use this option for private or confidential work. The gateway limits requests by IP and availability can change. Your main ChatGPT model stays the same.</p>
+                    <div class="step-actions"><button class="btn" id="goalUseKeyless" type="button">Use free cloud for Goal and Loop</button></div>
+                    <div class="step-actions"><button class="btn" type="button" data-link="https://kilo.ai/terms">Kilo terms</button><button class="btn" type="button" data-link="https://kilo.ai/privacy">Privacy policy</button></div>
+                    <p class="hint" id="goalKeylessState" role="status"></p>
+                  </div>
                   <div class="setting">
                     <span class="setting-text">
                       <b>Provider</b>
-                      <em>OpenRouter, ATXP, or your own OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, a gateway) for the API response source.</em>
+                      <em>Kilo Free needs no key; OpenRouter and ATXP use your credentials. Or run an OpenAI-compatible endpoint locally.</em>
                     </span>
                     <select id="goalProvider">
+                      <option value="kilo">Kilo Free · no key</option>
                       <option value="openrouter">OpenRouter</option>
                       <option value="atxp">ATXP</option>
                       <option value="custom">Custom endpoint</option>
@@ -729,6 +737,16 @@
                       </button>
                     </div>
                   </div>
+                  <div class="field" id="goalFreeSource">
+                    <label>Free models for Goal and Loop</label>
+                    <p class="hint">Browse OpenRouter models currently listed with zero prices and structured text output. OpenRouter requires its own key; for no-key use, choose Kilo Free above. Free usage limits can change. Your main ChatGPT model stays the same.</p>
+                    <div class="step-actions">
+                      <button class="btn" id="goalPickFree" type="button">Browse free models</button>
+                      <button class="btn" type="button" data-link="https://github.com/12britz/awesome-free-models">
+                        <svg class="ico" viewBox="0 0 24 24"><use href="#i-out" /></svg>Awesome Free Models
+                      </button>
+                    </div>
+                  </div>
                   <!--
                     The catalogue is several hundred models long and changes weekly, so it is
                     not fetched until somebody actually asks to change the one in use - and
@@ -743,6 +761,7 @@
                   </div>
 
                   <div class="field" id="goalModels" hidden>
+                    <label class="goal-free-filter" id="goalFreeFilter"><input id="goalFreeOnly" type="checkbox" /> Show free models only</label>
                     <div id="goalModelList" class="goal-models"></div>
                     <p class="hint" id="goalModelsState"></p>
                     <div class="step-actions">

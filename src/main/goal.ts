@@ -75,6 +75,7 @@ import type { GoalMode, GoalProviderKind, GoalReasoning } from '../shared/types.
 
 /** Where OpenRouter lives. One host, both routes. */
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+const KILO_BASE = 'https://api.kilo.ai/api/gateway';
 const ATXP_BASE = 'https://llm.atxp.ai/v1';
 
 /**
@@ -89,7 +90,7 @@ const ATTRIBUTION_HEADERS: Record<string, string> = {
 /** Which LLM endpoint the Goal/Loop second model runs on, resolved per call from config. */
 export interface GoalEndpoint {
   kind: GoalProviderKind;
-  /** Raw configured base URL for custom; OPENROUTER_BASE for openrouter. */
+  /** Raw configured base URL for custom; a fixed URL for hosted providers. */
   baseUrl: string;
 }
 
@@ -97,6 +98,7 @@ export function goalEndpoint(): GoalEndpoint {
   const provider = getConfig().goal.provider;
   if (provider?.kind === 'custom') return { kind: 'custom', baseUrl: provider.baseUrl };
   if (provider?.kind === 'atxp') return { kind: 'atxp', baseUrl: ATXP_BASE };
+  if (provider?.kind === 'kilo') return { kind: 'kilo', baseUrl: KILO_BASE };
   return { kind: 'openrouter', baseUrl: OPENROUTER_BASE };
 }
 
@@ -111,6 +113,7 @@ export function goalEndpoint(): GoalEndpoint {
 export function resolveGoalBaseUrl(endpoint: GoalEndpoint): string {
   if (endpoint.kind === 'openrouter') return OPENROUTER_BASE;
   if (endpoint.kind === 'atxp') return ATXP_BASE;
+  if (endpoint.kind === 'kilo') return KILO_BASE;
   const raw = endpoint.baseUrl.trim().replace(/\/+$/, '');
   let url: URL;
   try {
@@ -128,12 +131,13 @@ export function resolveGoalBaseUrl(endpoint: GoalEndpoint): string {
 
 /** The credential for one provider kind. Custom endpoints are often keyless local servers. */
 export function goalProviderKey(kind: GoalProviderKind): Promise<string | null> {
+  if (kind === 'kilo') return Promise.resolve(null);
   return getSecret(kind === 'custom' ? 'customProviderApiKey' : kind === 'atxp' ? 'atxpConnection' : 'openRouterApiKey');
 }
 
 /** Hosted providers require a credential; a custom endpoint may deliberately be keyless. */
 function providerNeedsCredential(kind: GoalProviderKind): boolean {
-  return kind !== 'custom';
+  return kind !== 'custom' && kind !== 'kilo';
 }
 
 /** How many messages of history the goal model is given, newest kept. */
@@ -1446,6 +1450,21 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
   } catch (error) {
     return { action: 'http', error: (error as Error).message };
   }
+  // Anonymous Kilo access is for catalog-confirmed free models only. Validate before
+  // sending any conversation text: a hand-edited model id must never turn this path
+  // into a paid request or silently route to a different model.
+  if (request.endpoint.kind === 'kilo') {
+    let catalog: GoalModel[];
+    try {
+      // Picker cache is useful for browsing, but eligibility may change between turns.
+      catalog = await allGoalModels(request.endpoint, true);
+    } catch (error) {
+      return { action: 'http', error: `request_failed: Kilo free-model list unavailable: ${(error as Error).message}` };
+    }
+    if (!request.model.endsWith(':free') || !catalog.some((model) => model.id === request.model && model.free)) {
+      return { action: 'http', error: 'unknown_model: choose a currently free Goal/Loop-compatible Kilo model' };
+    }
+  }
   const openrouter = request.endpoint.kind === 'openrouter';
   const body: Record<string, unknown> = {
     model: request.model,
@@ -1475,7 +1494,7 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
       ...(request.reasoning === 'default' ? {} : { effort: request.reasoning }),
       exclude: true
     };
-  } else if (request.reasoning !== 'default') {
+  } else if (request.endpoint.kind !== 'kilo' && request.reasoning !== 'default') {
     body['reasoning_effort'] = request.reasoning;
   }
 
@@ -1793,11 +1812,11 @@ async function httpFailure(response: Response, provider: GoalProviderKind = 'ope
     // intentionally not read.
     if (error instanceof Error && error.message === 'response_body_too_large') detail = 'response body too large';
   }
-  const label = provider === 'atxp' ? 'ATXP' : provider === 'custom' ? 'the custom provider' : 'OpenRouter';
-  if (response.status === 401 || response.status === 403) return `auth_rejected: ${detail || (provider === 'atxp' ? 'the ATXP connection was refused' : provider === 'custom' ? 'the custom provider credential was refused' : 'the OpenRouter key was refused')}`;
-  if (response.status === 402) return `out_of_credit: ${detail || `${label} account is out of credit`}`;
+  const label = provider === 'atxp' ? 'ATXP' : provider === 'custom' ? 'the custom provider' : provider === 'kilo' ? 'Kilo' : 'OpenRouter';
+  if (response.status === 401 || response.status === 403) return `auth_rejected: ${detail || (provider === 'atxp' ? 'the ATXP connection was refused' : provider === 'custom' ? 'the custom provider credential was refused' : provider === 'kilo' ? 'anonymous Kilo access was refused' : 'the OpenRouter key was refused')}`;
+  if (response.status === 402) return `out_of_credit: ${detail || (provider === 'kilo' ? 'Kilo no longer serves this model anonymously for free' : `${label} account is out of credit`)}`;
   if (response.status === 404) return `unknown_model: ${detail || `${label} does not know that model id`}`;
-  if (response.status === 429) return `rate_limited: ${detail || (provider === 'atxp' ? 'ATXP is rate-limiting this connection' : provider === 'custom' ? 'the custom provider is rate-limiting this request' : 'OpenRouter is rate-limiting this key')}`;
+  if (response.status === 429) return `rate_limited: ${detail || (provider === 'atxp' ? 'ATXP is rate-limiting this connection' : provider === 'custom' ? 'the custom provider is rate-limiting this request' : provider === 'kilo' ? 'Kilo is rate-limiting this IP address' : 'OpenRouter is rate-limiting this key')}`;
   return `http_${response.status}${detail ? `: ${detail}` : ''}`;
 }
 
@@ -2474,6 +2493,10 @@ export interface GoalModel {
   /** Unix seconds, as OpenRouter publishes it. 0 when the listing did not say. */
   created: number;
   contextLength: number;
+  /** Live provider metadata confirms zero pricing and Goal/Loop's structured text features. */
+  free: boolean;
+  /** Kilo's provider-level disclosure, when the catalog supplies it. */
+  mayTrainOnYourPrompts?: boolean;
 }
 
 let modelCache: { at: number; keyScope: string; models: GoalModel[] } | null = null;
@@ -2486,20 +2509,60 @@ let modelCache: { at: number; keyScope: string; models: GoalModel[] } | null = n
  * exists than the one already chosen. Paged, because the listing is several hundred long and
  * nobody scrolls that.
  */
-export async function listGoalModels(offset = 0, limit = MODEL_PAGE_SIZE): Promise<{ models: GoalModel[]; total: number }> {
-  const models = await allGoalModels();
+export async function listGoalModels(offset = 0, limit = MODEL_PAGE_SIZE, freeOnly = false, providerOverride?: 'kilo'): Promise<{ models: GoalModel[]; total: number }> {
+  // The setup button can inspect Kilo's public catalogue before changing live settings.
+  // This is deliberately a fixed provider override, never a renderer-supplied URL.
+  const endpoint = providerOverride === 'kilo' ? { kind: 'kilo' as const, baseUrl: KILO_BASE } : goalEndpoint();
+  if (freeOnly && !['openrouter', 'kilo'].includes(endpoint.kind)) throw new Error('Free-only discovery is available for OpenRouter or Kilo models only');
+  const catalog = await allGoalModels(endpoint);
+  const models = freeOnly ? catalog.filter(model => model.free) : catalog;
   const from = Math.max(0, Math.floor(offset));
   const count = Math.max(1, Math.min(100, Math.floor(limit)));
   return { models: models.slice(from, from + count), total: models.length };
 }
 
-async function allGoalModels(): Promise<GoalModel[]> {
-  const endpoint = goalEndpoint();
+/** A malformed or separately priced modality cannot support a free claim. */
+function explicitZeroPrice(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value) && value === 0;
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) return false;
+  // Number(text) can underflow a tiny nonzero decimal to 0; inspect its digits instead.
+  return /^[0.]+$/.test(text.split(/[eE]/, 1)[0]!);
+}
+
+function confirmedFreePricing(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prices = value as Record<string, unknown>;
+  if (!['prompt', 'completion'].every(field => Object.hasOwn(prices, field))) return false;
+  // The catalogue can price image, audio, search or future modalities independently.
+  // Request pricing is optional in OpenRouter's listing; when present it must also be zero.
+  // Check every published field rather than treating zero text tokens as a free model.
+  return Object.values(prices).every(explicitZeroPrice);
+}
+
+/** Match the OpenRouter parameters and output format sent by requestGoalDecision(). */
+function supportsGoalOutput(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const model = value as { architecture?: unknown; supported_parameters?: unknown };
+  const architecture = model.architecture;
+  const output = architecture && typeof architecture === 'object' && !Array.isArray(architecture)
+    ? (architecture as { output_modalities?: unknown }).output_modalities : null;
+  const parameters = model.supported_parameters;
+  return Array.isArray(output) && output.includes('text') &&
+    Array.isArray(parameters) && parameters.includes('response_format') && parameters.includes('structured_outputs');
+}
+
+async function allGoalModels(endpoint = goalEndpoint(), fresh = false): Promise<GoalModel[]> {
   const custom = endpoint.kind === 'custom';
   const openrouter = endpoint.kind === 'openrouter';
+  const kilo = endpoint.kind === 'kilo';
   const atxp = endpoint.kind === 'atxp';
   const key = await goalProviderKey(endpoint.kind);
-  if (providerNeedsCredential(endpoint.kind) && !key) throw new Error(endpoint.kind === 'atxp' ? 'ATXP connection string required' : 'OpenRouter API key required');
+  // OpenRouter's catalogue can be read anonymously; completion requests still require a key.
+  // ATXP's catalogue remains credential-bound. Do not turn a failed anonymous request into a
+  // static list: the caller must see the real provider error.
+  if (providerNeedsCredential(endpoint.kind) && !key && !openrouter) throw new Error('ATXP connection string required');
   // OpenRouter may return a key-restricted catalogue. A cache filled under key A is therefore
   // not valid under key B. Keep only a one-way fingerprint beside the models rather than the
   // credential itself; replacing a key immediately changes the cache scope without retaining
@@ -2509,7 +2572,7 @@ async function allGoalModels(): Promise<GoalModel[]> {
   const keyScope = custom
     ? `custom:${endpoint.baseUrl.trim()}:${credentialScope}`
     : `${endpoint.kind}:${credentialScope}`;
-  if (modelCache && modelCache.keyScope === keyScope && Date.now() - modelCache.at < MODEL_CACHE_MS) {
+  if (!fresh && modelCache && modelCache.keyScope === keyScope && Date.now() - modelCache.at < MODEL_CACHE_MS) {
     return modelCache.models;
   }
   const abort = new AbortController();
@@ -2520,7 +2583,7 @@ async function allGoalModels(): Promise<GoalModel[]> {
   // vanilla OpenAI shape, some answer nothing at all, and either way the model stays a
   // hand-typed field. A failure here returns an empty list rather than an error, while the
   // OpenRouter catalogue keeps its throwing behaviour so a broken default stays visible.
-  const label = custom ? 'custom provider' : atxp ? 'ATXP' : 'OpenRouter';
+  const label = custom ? 'custom provider' : atxp ? 'ATXP' : kilo ? 'Kilo' : 'OpenRouter';
   try {
     const baseUrl = resolveGoalBaseUrl(endpoint);
     response = await fetch(`${baseUrl}/models`, {
@@ -2563,8 +2626,13 @@ async function allGoalModels(): Promise<GoalModel[]> {
   for (const entry of raw) {
     if (models.length >= MAX_MODELS) break;
     if (!entry || typeof entry !== 'object') continue;
-    const model = entry as { id?: unknown; name?: unknown; created?: unknown; context_length?: unknown };
+    const model = entry as { id?: unknown; name?: unknown; created?: unknown; context_length?: unknown; pricing?: unknown;
+      architecture?: unknown; supported_parameters?: unknown; isFree?: unknown; mayTrainOnYourPrompts?: unknown };
     if (typeof model.id !== 'string' || model.id === '' || model.id.length > MAX_MODEL_FIELD_CHARS) continue;
+    const free = confirmedFreePricing(model.pricing) && supportsGoalOutput(model);
+    // Unlike OpenRouter, the anonymous Kilo integration exposes no paid catalog rows at all.
+    // Its own `isFree` flag and :free suffix must agree with published zero prices.
+    if (kilo && (!model.id.endsWith(':free') || model.isFree !== true || !free)) continue;
     // ATXP lists provider-qualified ids (for example openai/gpt-4.1) but its
     // OpenAI-compatible request API expects the model name without that company prefix.
     const id = atxp && model.id.includes('/') ? model.id.slice(model.id.indexOf('/') + 1) : model.id;
@@ -2578,7 +2646,10 @@ async function allGoalModels(): Promise<GoalModel[]> {
           : model.id,
       created: typeof model.created === 'number' && Number.isFinite(model.created) ? model.created : 0,
       contextLength:
-        typeof model.context_length === 'number' && Number.isFinite(model.context_length) ? model.context_length : 0
+        typeof model.context_length === 'number' && Number.isFinite(model.context_length) ? model.context_length : 0,
+      free: (openrouter || kilo) && free,
+      ...(kilo && typeof model.mayTrainOnYourPrompts === 'boolean'
+        ? { mayTrainOnYourPrompts: model.mayTrainOnYourPrompts } : {})
     });
   }
   // Newest first, and ties broken by id so the order is stable between two identical calls

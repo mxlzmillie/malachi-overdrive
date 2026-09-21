@@ -1354,6 +1354,66 @@ describe('the model catalogue', () => {
     expect(seenAuth).toEqual(['Bearer key-a', 'Bearer key-b']);
   });
 
+  it('filters free OpenRouter models from explicit zero pricing before paging', async () => {
+    const zero = { prompt: '0', completion: '0.000', request: 0, image: '0' };
+    const structured = { architecture: { output_modalities: ['text'] }, supported_parameters: ['response_format', 'structured_outputs'] };
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return Response.json({ data: [
+        { id: 'paid/tokens', created: 9, ...structured, pricing: { ...zero, completion: '0.000001' } },
+        { id: 'free/newest', created: 8, ...structured, pricing: zero },
+        { id: 'free/no-request-field', created: 7, ...structured, pricing: { prompt: '0', completion: '0' } },
+        { id: 'paid/image', created: 6, ...structured, pricing: { ...zero, image: '0.01' } },
+        { id: 'unknown/malformed', created: 5, ...structured, pricing: { ...zero, request: '' } },
+        { id: 'free/older', created: 4, ...structured, pricing: { prompt: 0, completion: '0e0', request: '0' } },
+        { id: 'paid/underflow', created: 3.5, ...structured, pricing: { ...zero, request: `0.${'0'.repeat(400)}1` } },
+        { id: 'unsupported/no-structured-output', created: 3.3, pricing: zero,
+          architecture: { output_modalities: ['text'] }, supported_parameters: ['response_format'] },
+        { id: 'unsupported/no-text-output', created: 3.2, pricing: zero,
+          architecture: { output_modalities: ['image'] }, supported_parameters: ['response_format', 'structured_outputs'] },
+        { id: 'unknown/no-pricing', created: 3 }
+      ] });
+    }) as never;
+
+    const all = await goal.listGoalModels(0, 20);
+    expect(all.total).toBe(10);
+    expect(all.models.filter(model => model.free).map(model => model.id)).toEqual(['free/newest', 'free/no-request-field', 'free/older']);
+    const first = await goal.listGoalModels(0, 1, true);
+    const second = await goal.listGoalModels(1, 1, true);
+    const third = await goal.listGoalModels(2, 1, true);
+    expect(first).toMatchObject({ total: 3, models: [{ id: 'free/newest', free: true }] });
+    expect(second).toMatchObject({ total: 3, models: [{ id: 'free/no-request-field', free: true }] });
+    expect(third).toMatchObject({ total: 3, models: [{ id: 'free/older', free: true }] });
+    expect(calls).toBe(1);
+  });
+
+  it('browses OpenRouter anonymously but still reports a rejected public catalogue', async () => {
+    await setSecret('openRouterApiKey', '');
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      expect(String(url)).toBe('https://openrouter.ai/api/v1/models');
+      expect(new Headers(init?.headers).has('authorization')).toBe(false);
+      return Response.json({ data: [{ id: 'public/free', pricing: { prompt: '0', completion: '0' },
+        architecture: { output_modalities: ['text'] }, supported_parameters: ['response_format', 'structured_outputs'] }] });
+    }) as never;
+    expect(await goal.goalKeyPresent()).toBe(false);
+    expect((await goal.listGoalModels(0, 20, true)).models).toMatchObject([{ id: 'public/free', free: true }]);
+  });
+
+  it('does not fabricate free models when anonymous OpenRouter browsing is refused', async () => {
+    await setSecret('openRouterApiKey', '');
+    globalThis.fetch = (async () => new Response('unauthorized', { status: 401 })) as never;
+    await expect(goal.listGoalModels(0, 20, true)).rejects.toThrow('HTTP 401');
+  });
+
+  it('does not claim free pricing for a non-OpenRouter catalogue', async () => {
+    const config = defaultConfig();
+    await saveConfig({ ...config, goal: { ...config.goal, provider: { kind: 'custom', baseUrl: 'http://localhost:11434/v1' } } });
+    globalThis.fetch = (async () => Response.json({ data: [{ id: 'local', pricing: { prompt: '0', completion: '0', request: '0' } }] })) as never;
+    expect((await goal.listGoalModels()).models).toMatchObject([{ id: 'local', free: false }]);
+    await expect(goal.listGoalModels(0, 20, true)).rejects.toThrow('OpenRouter');
+  });
+
   it('says the listing failed rather than pretending the catalogue is empty', async () => {
     globalThis.fetch = (async () => new Response('nope', { status: 500 })) as never;
     await expect(goal.listGoalModels(0, 20)).rejects.toThrow('HTTP 500');
@@ -2433,6 +2493,160 @@ it('never owes or generates a browser continuation for Astra even with Goal arme
   goal.beginGoalDraft(conversationId, draft.token);
   await vi.waitFor(() => expect(goal.goalViewFor(conversationId)?.stage).toBe('no-reply'));
   expect(fetch).not.toHaveBeenCalled();
+});
+
+describe('anonymous Kilo free Goal/Loop models', () => {
+  const freeId = 'nex-agi/nex-n2.5-mini:free';
+  const structured = { architecture: { output_modalities: ['text'] }, supported_parameters: ['response_format', 'structured_outputs'] };
+  const zero = { prompt: '0', completion: '0', discount: 0 };
+
+  async function useKilo(model = freeId, mode: 'goal' | 'loop' = 'goal', reasoning: 'default' | 'high' = 'default'): Promise<void> {
+    const config = defaultConfig();
+    await saveConfig({ ...config, goal: { ...config.goal, enabled: true, mode, backend: 'api', loopBackend: 'api',
+      model, reasoning, provider: { kind: 'kilo', baseUrl: '' } } });
+  }
+
+  async function userSession(conversationId: string): Promise<{ id: string }> {
+    const session = await createSession({ title: 'Kilo test', conversationId });
+    await appendEvent(session.id, { time: 1_000, source: 'extension', kind: 'user_message',
+      message: { text: 'say hello', truncated: false, chars: 9 } });
+    return session;
+  }
+
+  it('shows only catalog-proven free structured text models without a key', async () => {
+    await useKilo();
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      urls.push(String(url));
+      expect(new Headers(init?.headers).has('authorization')).toBe(false);
+      expect(new Headers(init?.headers).has('HTTP-Referer')).toBe(false);
+      return Response.json({ data: [
+        { id: freeId, name: 'Nex Mini', created: 5, pricing: zero, isFree: true,
+          mayTrainOnYourPrompts: true, ...structured },
+        { id: 'paid/model', created: 6, pricing: { ...zero, completion: '0.01' }, isFree: false, ...structured },
+        { id: 'mislabelled/model:free', created: 7, pricing: { ...zero, request: '1' }, isFree: true, ...structured },
+        { id: 'unsupported/model:free', created: 8, pricing: zero, isFree: true,
+          architecture: { output_modalities: ['text'] }, supported_parameters: ['response_format'] },
+        { id: 'unconfirmed/model:free', created: 9, pricing: zero, ...structured }
+      ] });
+    }) as never;
+    expect(await goal.goalKeyPresent()).toBe(true);
+    expect(await goal.listGoalModels(0, 20)).toMatchObject({ total: 1,
+      models: [{ id: freeId, free: true, mayTrainOnYourPrompts: true }] });
+    expect(await goal.listGoalModels(0, 20, true)).toMatchObject({ total: 1,
+      models: [{ id: freeId, free: true }] });
+    expect(urls).toEqual(['https://api.kilo.ai/api/gateway/models']);
+  });
+
+  it('previews Kilo free models without changing the active provider', async () => {
+    expect(goal.goalEndpoint().kind).toBe('openrouter');
+    globalThis.fetch = (async (url: string) => {
+      expect(String(url)).toBe('https://api.kilo.ai/api/gateway/models');
+      return Response.json({ data: [{ id: freeId, pricing: zero, isFree: true, ...structured }] });
+    }) as never;
+    expect((await goal.listGoalModels(0, 20, true, 'kilo')).models.map(model => model.id)).toEqual([freeId]);
+    expect(goal.goalEndpoint().kind).toBe('openrouter');
+  });
+
+  it('sends a Goal decision anonymously with only the strict schema', async () => {
+    await useKilo();
+    const session = await userSession('c-kilo-anon');
+    let sent: { url: string; headers: Headers; body: any } | null = null;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) return Response.json({ data: [
+        { id: freeId, pricing: zero, isFree: true, ...structured }
+      ] });
+      sent = { url: String(url), headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) };
+      return decision('continue', 'hello');
+    }) as never;
+    goal.startGoalDraft({ sessionId: session.id, conversationId: 'c-kilo-anon', turnId: 'g-1' });
+    const view = await settled('c-kilo-anon');
+    expect(view.stage).toBe('ready');
+    expect(view.reply).toBeTruthy();
+    expect(sent).not.toBeNull();
+    expect(sent!.url).toBe('https://api.kilo.ai/api/gateway/chat/completions');
+    expect(sent!.headers.has('authorization')).toBe(false);
+    expect(sent!.headers.has('HTTP-Referer')).toBe(false);
+    expect(sent!.headers.has('X-Title')).toBe(false);
+    expect(sent!.body).not.toHaveProperty('provider');
+    expect(sent!.body).not.toHaveProperty('plugins');
+    expect(sent!.body.response_format).toMatchObject({ type: 'json_schema',
+      json_schema: { name: 'goal_decision', strict: true, schema: { properties: {
+        action: { enum: ['stop', 'continue'] } } } } });
+  });
+
+  it('keeps the Loop schema continue-only on the anonymous route', async () => {
+    await useKilo(freeId, 'loop');
+    const session = await userSession('c-kilo-loop');
+    let body: any = null;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) return Response.json({ data: [
+        { id: freeId, pricing: zero, isFree: true, ...structured }
+      ] });
+      body = JSON.parse(String(init?.body));
+      return decision('continue', 'continue the work');
+    }) as never;
+    goal.startGoalDraft({ sessionId: session.id, conversationId: 'c-kilo-loop', turnId: 'g-1' });
+    expect((await settled('c-kilo-loop')).stage).toBe('ready');
+    expect(body.response_format.json_schema.schema.properties.action.enum).toEqual(['continue']);
+  });
+
+  it('omits unsupported reasoning effort even if an old setting retains High', async () => {
+    await useKilo(freeId, 'goal', 'high');
+    const session = await userSession('c-kilo-high');
+    let body: any;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) return Response.json({ data: [
+        { id: freeId, pricing: zero, isFree: true, ...structured }
+      ] });
+      body = JSON.parse(String(init?.body));
+      return decision('continue', 'hello');
+    }) as never;
+    goal.startGoalDraft({ sessionId: session.id, conversationId: 'c-kilo-high', turnId: 'g-1' });
+    expect((await settled('c-kilo-high')).stage).toBe('ready');
+    expect(body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('refreshes free eligibility before a completion instead of trusting a cached picker', async () => {
+    await useKilo();
+    const session = await userSession('c-kilo-stale');
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      urls.push(String(url));
+      return Response.json({ data: [{ id: freeId, pricing: urls.length === 1 ? zero : { prompt: '1', completion: '1' },
+        isFree: urls.length === 1, ...structured }] });
+    }) as never;
+    expect((await goal.listGoalModels(0, 20, true)).total).toBe(1);
+    goal.startGoalDraft({ sessionId: session.id, conversationId: 'c-kilo-stale', turnId: 'g-1' });
+    expect((await settled('c-kilo-stale')).error).toMatch(/^unknown_model/);
+    expect(urls).toEqual(Array(2).fill('https://api.kilo.ai/api/gateway/models'));
+  });
+
+  it('refuses a paid or unlisted model before sending conversation text', async () => {
+    await useKilo('paid/model');
+    const session = await userSession('c-kilo-paid');
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      urls.push(String(url));
+      return Response.json({ data: [
+        { id: freeId, pricing: zero, isFree: true, ...structured },
+        { id: 'paid/model', pricing: { prompt: '1', completion: '1' }, isFree: false, ...structured }
+      ] });
+    }) as never;
+    goal.startGoalDraft({ sessionId: session.id, conversationId: 'c-kilo-paid', turnId: 'g-1' });
+    expect(await settled('c-kilo-paid')).toMatchObject({ stage: 'failed', error: expect.stringMatching(/^unknown_model/) });
+    expect(urls).toEqual(['https://api.kilo.ai/api/gateway/models']);
+  });
+
+  it('reports a changed free-model price without referring to an account balance', async () => {
+    await useKilo();
+    const session = await userSession('c-kilo-price-drift');
+    globalThis.fetch = (async (url: string) => String(url).endsWith('/models')
+      ? Response.json({ data: [{ id: freeId, pricing: zero, isFree: true, ...structured }] })
+      : new Response('', { status: 402 })) as never;
+    goal.startGoalDraft({ sessionId: session.id, conversationId: 'c-kilo-price-drift', turnId: 'g-1' });
+    expect((await settled('c-kilo-price-drift')).error).toBe('out_of_credit: Kilo no longer serves this model anonymously for free');
+  });
 });
 
 describe('a custom OpenAI-compatible provider', () => {

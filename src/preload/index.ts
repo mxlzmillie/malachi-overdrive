@@ -46,7 +46,7 @@ export interface SettingsPatch {
 
 /** One page of the model catalogue, as the model picker asks for it. */
 export interface GoalModelPage {
-  models: Array<{ id: string; name: string; created: number; contextLength: number }>;
+  models: Array<{ id: string; name: string; created: number; contextLength: number; free: boolean; mayTrainOnYourPrompts?: boolean }>;
   total: number;
 }
 
@@ -128,7 +128,7 @@ const api = {
   setAtxpConnection: (value: string) => call<AppState>('secret:set', { value, key: 'atxpConnection' }),
   // The same, for a custom provider endpoint. Optional: keyless local servers need nothing stored.
   setCustomProviderKey: (value: string) => call<AppState>('secret:set', { value, key: 'customProviderApiKey' }),
-  listGoalModels: (offset: number) => call<GoalModelPage>('goal:models', { offset }),
+  listGoalModels: (offset: number, freeOnly = false, provider?: 'kilo') => call<GoalModelPage>('goal:models', { offset, freeOnly, provider }),
   pickBinary: () => call<AppState>('binary:pick'),
   connect: () => call<AppState>('connection:connect'),
   disconnect: () => call<AppState>('connection:disconnect'),

@@ -2540,6 +2540,14 @@ nav button:hover, nav button.is-sel { background: var(--hover); color: var(--ink
 
 /* The model picker. Closed until somebody asks for it, twenty at a time, and scrolling
    rather than growing — the pane below it is a settings sheet, not a catalogue. */
+.goal-free-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
 .goal-models {
   display: flex;
   flex-direction: column;

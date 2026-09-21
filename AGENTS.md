@@ -2422,6 +2422,26 @@ list and the model stays a hand-typed field. `renderer/chat.ts::loadGoalModels()
 `maybePageGoalModels()` own scroll-paged presentation only; load failure leaves the user's current
 model selection untouched.
 
+The optional Free models view filters the same live OpenRouter catalogue before paging. A row
+qualifies only when published prompt and completion prices are explicit zero, every other published
+price is also zero, and the model advertises structured text output compatible with Goal/Loop's
+JSON response contract. Missing or malformed evidence stays out of the free view. This is discovery,
+not a new ChatGPT model identity or a pricing guarantee: running Goal/Loop through OpenRouter still
+requires its own key and provider limits apply. Selecting a row from the free-only picker with
+a stored OpenRouter key switches both Goal and Loop response sources to the API; without a key,
+the existing sources remain as they are. The linked Awesome Free Models repository is a
+human-readable reference, not an inference endpoint or runtime dependency.
+
+Kilo Free is a separate opt-in API provider for Goal/Loop with no account or credential. Its
+anonymous gateway accepts only currently eligible free models and has IP-based rate limits. The
+renderer tells the person before activation that recorded conversation text and, when enabled,
+tool arguments/results reach Kilo and a model provider that may retain or train on prompts. It
+links provider terms and warns against private/confidential work. It first verifies a live,
+structured-output-compatible free catalogue entry; only then does it switch Goal and Loop to the
+API source. The main process refreshes the selected model's free eligibility before transmitting conversation
+content, rejects an unknown or paid model, and never falls back to another provider. Existing
+ChatGPT, OpenRouter, ATXP and custom selections are preserved unless the person chooses Kilo Free.
+
 An untouched persisted copy of any superseded shipped Goal default migrates to the current
 default; customized text stays exact. That holds for all three, each with its own list in
 `shared/goal.ts` and all three walked by `config.ts::adoptCurrentGoalPrompt()` — for a while only

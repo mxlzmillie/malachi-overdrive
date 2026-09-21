@@ -406,8 +406,9 @@ async function mountChat(
         keys.push({ method: 'setApiKey', value });
         return ok(state);
       },
-      listGoalModels: (offset: number) => {
-        const page = { models: models.slice(offset, offset + 20), total: models.length, offset };
+      listGoalModels: (offset: number, freeOnly = false, provider?: 'kilo') => {
+        const available = freeOnly ? models.filter((model) => model.free === true) : models;
+        const page = { models: available.slice(offset, offset + 20), total: available.length, offset, freeOnly, provider };
         modelPages.push(page);
         return ok(page);
       },
@@ -1120,6 +1121,107 @@ it('saves the chosen model id', async () => {
 
   expect(doc.getElementById('goalModelName')!.textContent).toBe('vendor1/model-1');
   expect(mounted.calls.at(-1)?.goal).toMatchObject({ model: 'vendor1/model-1' });
+});
+
+it('shows live-priced free OpenRouter models and saves one for Goal and Loop', async () => {
+  const mounted = await mountChat({ hasGoalKey: true }, [
+    { id: 'vendor/paid', name: 'Paid', created: 3, contextLength: 100, free: false },
+    { id: 'vendor/free:free', name: 'Free', created: 2, contextLength: 200, free: true }
+  ]);
+  const doc = mounted.window.document;
+
+  (doc.getElementById('goalPickFree') as HTMLButtonElement).click();
+  await settle();
+  expect(mounted.modelPages[0]).toMatchObject({ freeOnly: true, total: 1 });
+  expect([...doc.querySelectorAll<HTMLElement>('.goal-model')].map((row) => row.dataset.model)).toEqual(['vendor/free:free']);
+  expect(doc.getElementById('goalModelsState')!.textContent).toContain('currently free');
+
+  (doc.querySelector('.goal-model') as HTMLButtonElement).click();
+  await settle();
+  expect(mounted.calls.at(-1)?.goal.model).toBe('vendor/free:free');
+  expect(mounted.calls.at(-1)?.goal.provider.kind).toBe('openrouter');
+  expect(mounted.calls.at(-1)?.goal.backend).toBe('api');
+  expect(mounted.calls.at(-1)?.goal.loopBackend).toBe('api');
+
+  const filter = doc.getElementById('goalFreeOnly') as HTMLInputElement;
+  filter.checked = false;
+  filter.dispatchEvent(new mounted.window.Event('change'));
+  await settle();
+  expect(mounted.modelPages.at(-1)).toMatchObject({ freeOnly: false, total: 2 });
+  expect(doc.querySelectorAll('.goal-model')).toHaveLength(2);
+
+  (doc.getElementById('goalPickFree') as HTMLButtonElement).click();
+  await settle();
+  expect(mounted.modelPages.at(-1)).toMatchObject({ freeOnly: true, total: 1 });
+  expect(doc.querySelectorAll('.goal-model')).toHaveLength(1);
+
+  const key = doc.getElementById('goalKey') as HTMLInputElement;
+  key.value = 'sk-or-v1-replacement';
+  key.dispatchEvent(new mounted.window.Event('blur'));
+  await settle();
+  expect(mounted.modelPages.at(-1)).toMatchObject({ freeOnly: true, total: 1 });
+  expect(mounted.modelPages).toHaveLength(4);
+});
+
+it('keeps ChatGPT Goal and Loop sources until an OpenRouter key exists', async () => {
+  const mounted = await mountChat({}, [{ id: 'vendor/free:free', name: 'Free', created: 2, contextLength: 200, free: true }]);
+  const doc = mounted.window.document;
+  (doc.getElementById('goalPickFree') as HTMLButtonElement).click();
+  await settle();
+  (doc.querySelector('.goal-model') as HTMLButtonElement).click();
+  await settle();
+  expect(mounted.calls.at(-1)?.goal.model).toBe('vendor/free:free');
+  expect(mounted.calls.at(-1)?.goal.backend).toBe('chatgpt');
+  expect(mounted.calls.at(-1)?.goal.loopBackend).toBe('chatgpt');
+});
+
+it('enables a confirmed free cloud model for Goal and Loop without a key', async () => {
+  const mounted = await mountChat({}, [
+    { id: 'vendor/paid', name: 'Paid', created: 3, contextLength: 100, free: false },
+    { id: 'nex-agi/nex-n2.5-mini:free', name: 'Nex Mini', created: 2, contextLength: 200, free: true, mayTrainOnYourPrompts: true }
+  ]);
+  const doc = mounted.window.document;
+  expect(doc.getElementById('goalKeylessSource')!.textContent).toContain('may retain or train on prompts');
+  (doc.getElementById('goalUseKeyless') as HTMLButtonElement).click();
+  await settle(); await settle(); await settle();
+  expect(mounted.modelPages.at(-1)).toMatchObject({ freeOnly: true, provider: 'kilo', total: 1 });
+  expect(mounted.calls.at(-1)?.goal).toMatchObject({
+    provider: { kind: 'kilo' }, model: 'nex-agi/nex-n2.5-mini:free', backend: 'api', loopBackend: 'api'
+  });
+  expect(mounted.keys).toEqual([]);
+  expect(doc.getElementById('goalKeylessState')!.textContent).toContain('without an API key');
+});
+
+it('always queries the Kilo catalog when its picker opens before a provider change saves', async () => {
+  const mounted = await mountChat({}, [{ id: 'nex-agi/nex-n2.5-mini:free', name: 'Nex Mini', created: 2, contextLength: 200, free: true }]);
+  const doc = mounted.window.document;
+  // The picker reads the current form before a change may have reached the main process.
+  (doc.getElementById('goalProvider') as HTMLSelectElement).value = 'kilo';
+  (doc.getElementById('goalPick') as HTMLButtonElement).click();
+  await settle(); await settle();
+  expect(mounted.modelPages.at(-1)).toMatchObject({ provider: 'kilo', freeOnly: true });
+});
+
+it('sets Kilo reasoning to provider default when switching from OpenRouter High', async () => {
+  const mounted = await mountChat({}, [], {}, { reasoning: 'high' });
+  const doc = mounted.window.document;
+  const provider = doc.getElementById('goalProvider') as HTMLSelectElement;
+  provider.value = 'kilo';
+  provider.dispatchEvent(new mounted.window.Event('change', { bubbles: true }));
+  await settle(); await settle();
+  expect(mounted.calls.at(-1)?.goal.reasoning).toBe('default');
+  expect((doc.getElementById('goalReasoning') as HTMLSelectElement).disabled).toBe(true);
+});
+
+it('keeps the old source when no compatible no-key model is available', async () => {
+  const mounted = await mountChat({}, [{ id: 'vendor/paid', name: 'Paid', created: 3, contextLength: 100, free: false }]);
+  const doc = mounted.window.document;
+  const previous = structuredClone(mounted.state.config.goal);
+  (doc.getElementById('goalUseKeyless') as HTMLButtonElement).click();
+  await settle(); await settle(); await settle();
+  expect(mounted.calls).toHaveLength(0);
+  expect(mounted.state.config.goal).toEqual(previous);
+  expect(doc.getElementById('goalKeylessState')!.textContent).toContain('previous source is unchanged');
 });
 
 /** A provider that cannot be reached says so and changes nothing about what is in use. */

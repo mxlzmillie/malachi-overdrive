@@ -41,7 +41,7 @@
  * into somebody's conversation.
  */
 
-import { requestBrowserDecision, authorizeBrowserHelperRetry } from './session/input.js';
+import { requestBrowserDecision, authorizeBrowserHelperRetry, startReplacementBrowserHelper } from './session/input.js';
 import { planProgressText, type TaskProgressUpdate } from '../shared/task-progress.js';
 import { TaskRequestError } from './task-request.js';
 import { GOAL_MARKER_INSTRUCTION, templateGoalDecision } from '../shared/goal-templates.js';
@@ -1063,8 +1063,12 @@ export async function retryGoalBrowserHelper(sourceSessionId: string, inputId: s
   const session = await getSession(sourceSessionId);
   if (!session?.conversationId) return false;
   const draft = drafts.get(session.conversationId);
-  if (draft && (draft.sessionId !== sourceSessionId || draft.stage !== 'failed')) return false;
-  if (!goalRuntimeAvailable() || (draft && !goalArmedFor(session.conversationId))) return false;
+  // The normal in-memory retry can safely recreate the same Goal draft. After an
+  // app restart there is no draft to resume, so a direct user click creates one
+  // new standalone helper instead of merely clearing the old retry fence.
+  if (!draft) return startReplacementBrowserHelper(inputId, sourceSessionId);
+  if (draft.sessionId !== sourceSessionId || draft.stage !== 'failed') return false;
+  if (!goalRuntimeAvailable() || !goalArmedFor(session.conversationId)) return false;
   if (!await authorizeBrowserHelperRetry(inputId, sourceSessionId)) return false;
   // Keep the existing reply obligation. Only the failed transport attempt is replaced;
   // the page still owns final-turn eligibility and the eventual native send receipt.

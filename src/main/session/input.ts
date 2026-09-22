@@ -9,7 +9,7 @@ import type { SessionSummary } from '../../shared/session.js';
 import { getConfig } from '../config.js';
 import { randomUUID } from 'node:crypto';
 import { readDurable, writeDurableNow, writeDurableSoon } from '../durable.js';
-import { getSession, findSessionByConversation, createSession, conversationWasSuperseded, readRecentEvents, listUsageSessions } from './store.js';
+import { appendEvent, getSession, findSessionByConversation, createSession, conversationWasSuperseded, readRecentEvents, listUsageSessions } from './store.js';
 import { assignSessionProject, projectWorkspace, getSessionProject } from '../projects.js';
 import { isChatBlocked } from './blocked-chats.js';
 import { wakeBrowserWork } from '../browser-wake.js';
@@ -56,6 +56,8 @@ const entrySchema = inputArgs.extend({
   text: z.string().min(1).max(240000),
   deliveryText: z.string().min(1).max(240000).optional(),
   purpose: z.enum(['user', 'decision']).optional(),
+  /** A user explicitly restarted a browser helper after an ambiguous delivery. */
+  replacementHelper: z.boolean().optional(),
   lifetime: z.literal('temporary-planner').optional(),
   decisionSourceSessionId: z.string().min(8).max(64).optional(),
   response: z.string().max(16000).optional(),
@@ -789,6 +791,62 @@ export function authorizeBrowserHelperRetry(id: string, sourceSessionId: string)
   });
 }
 
+/**
+ * Starts a fresh, isolated helper after the user authorizes recovery from an
+ * ambiguous delivery.
+ *
+ * The cancelled row stays terminal and its previous browser owner can never answer
+ * on behalf of this new helper. This path is intentionally independent of Goal's
+ * in-memory draft: a user may need to restart the helper after the app restarted.
+ */
+export function startReplacementBrowserHelper(id: string, sourceSessionId: string): Promise<boolean> {
+  return serial(async () => {
+    const current = await load();
+    const row = current.find(entry => entry.id === id && entry.decisionSourceSessionId === sourceSessionId
+      && entry.purpose === 'decision' && entry.state === 'cancelled' && !entry.conversationId);
+    if (!row || current.some(entry => entry.decisionSourceSessionId === sourceSessionId && !terminal(entry))) return false;
+
+    const prefix = 'This is a replacement helper after the earlier helper delivery could not be confirmed. Do not send or retry any email outreach. Review the current account restriction and report the next permitted recovery step only.\n\n';
+    const room = 240000 - prefix.length;
+    const preservedText = row.text.length <= room
+      ? row.text
+      : `${row.text.slice(0, Math.floor(room / 2))}\n\n[Earlier helper context shortened]\n\n${row.text.slice(-Math.ceil(room / 2))}`;
+    const replacementId = randomUUID();
+    const replacement = entrySchema.parse({
+      ...row,
+      id: replacementId,
+      text: prefix + preservedText,
+      state: 'queued',
+      owner: null,
+      conversationId: null,
+      createdAt: Date.now(),
+      replacementHelper: true,
+      response: undefined,
+      error: undefined,
+      offeredAt: undefined,
+      sendAuthorizedAt: undefined,
+      requiresAuthorization: undefined,
+      deliveredSessionId: undefined,
+      deliveredAt: undefined,
+      messageId: undefined,
+      historyRecorded: undefined
+    });
+    // Keep the standard browser-decision claim contract. There is no Goal caller
+    // waiting for this manual result; it is written into the source task instead.
+    const ignored = new Promise<string>((resolve, reject) => { decisionWaiters.set(replacementId, { resolve, reject }); });
+    void ignored.catch(() => undefined);
+    try {
+      await commit(append(current.map(entry => entry === row
+        ? { ...entry, state: 'failed', error: 'User authorized a new helper' }
+        : entry), replacement));
+    } catch (error) {
+      decisionWaiters.delete(replacementId);
+      throw error;
+    }
+    return true;
+  });
+}
+
 /** Only a pre-send failure can be declared failed. An ambiguous click stays claimed. */
 export function failBrowserInput(id: string, owner: string, error: string): Promise<boolean> {
   return serial(async () => {
@@ -871,14 +929,41 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     if (!response.trim() || response.length > 16000) return false;
     const current = await load();
     if (current.some((entry) => entry.id === id && entry.owner === owner && entry.purpose === 'decision' && entry.state === 'sent' && entry.response === response)) return true;
+    // A cancelled helper has no live owner. Its late answer must be rejected before
+    // it can change the durable row; a replacement helper always installs its own
+    // fresh waiter when the user explicitly starts it.
     if (!decisionWaiters.has(id)) return false;
     const row = current.find((entry) => entry.id === id && entry.owner === owner && entry.purpose === 'decision' && ['browser', 'decision'].includes(entry.state));
     if (!row) return false;
     if (conversationId && row.conversationId && conversationId !== row.conversationId) return false;
     await commit(current.map((entry) => entry === row ? { ...entry, conversationId: conversationId ?? row.conversationId, state: 'sent', response } : entry));
     const waiter = decisionWaiters.get(id);
-    if (!waiter) await commit((await load()).map((entry) => entry.id === id ? { ...entry, state: 'cancelled', response: undefined } : entry));
-    waiter?.resolve(response);
-    return !!waiter;
+    if (!waiter) {
+      // Cancellation can race the atomic receipt write. Undo that transient receipt
+      // before returning so a late helper result never escapes its cancelled authority.
+      await commit((await load()).map((entry) => entry.id === id
+        ? { ...entry, state: 'cancelled', response: undefined }
+        : entry));
+      return false;
+    }
+    waiter.resolve(response);
+    decisionWaiters.delete(id);
+    if (row.replacementHelper && row.decisionSourceSessionId) {
+      // A standalone helper must never type a new user turn into its source chat.
+      // Its result stays visible there as local, durable app history after its
+      // short-lived helper window closes.
+      const source = await getSession(row.decisionSourceSessionId);
+      if (source) {
+        const text = `Replacement helper result:\n\n${response}`.slice(0, 16000);
+        try {
+          await appendEvent(source.id, {
+            time: Date.now(), source: 'app', kind: 'assistant_message', final: true,
+            messageId: `replacement-helper:${row.id}`,
+            message: { text, chars: text.length, truncated: false }
+          });
+        } catch { /* The durable helper receipt remains available in the outbox. */ }
+      }
+    }
+    return true;
   });
 }

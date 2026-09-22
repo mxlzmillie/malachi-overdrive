@@ -8,7 +8,7 @@ import { flushDurable, initDurableStore, readDurable, resetDurableForTests, writ
 import {
   inputArgs, acknowledgeBrowserInput, cancelInput, claimBrowserInput, completeBrowserDecision, enqueueInput,
   refuseBrowserInputIsolation, failBrowserInput, listInputs, offerToolInput, acknowledgeToolInput, pendingBrowserInputs, requestBrowserDecision, resetInputForTests, configureInputDelivery,
-  authorizeBrowserHelperRetry, pausedBrowserHelpers, hasEligibleToolInput, editQueuedInput, reorderQueuedInputs, setInputAutomation, authorizeBrowserInput, sessionInputPolicy
+  authorizeBrowserHelperRetry, startReplacementBrowserHelper, pausedBrowserHelpers, hasEligibleToolInput, editQueuedInput, reorderQueuedInputs, setInputAutomation, authorizeBrowserInput, sessionInputPolicy
 } from '../src/main/session/input.js';
 import type { InputArgs, InputEntry } from '../src/main/session/input.js';
 import { noteChatOrigin } from '../src/main/session/recorder.js';
@@ -28,7 +28,8 @@ vi.mock('../src/main/session/store.js', () => ({
     origin: { kind: binding.origin },
     finishTurn: { turnId: binding.activeTurnId, released: binding.finishReleased },
     selectedModel: { conversationId: id === 'session-two' ? 'conversation-b' : binding.conversationId, model: binding.model } })),
-  findSessionByConversation: vi.fn(async (id: string) => binding.recorded && id === binding.conversationId ? { id: 'session-one', conversationId: id } : null)
+  findSessionByConversation: vi.fn(async (id: string) => binding.recorded && id === binding.conversationId ? { id: 'session-one', conversationId: id } : null),
+  appendEvent: vi.fn(async () => undefined)
 }));
 vi.mock('../src/main/config.js', () => ({ getConfig: () => ({ ui: { finishTool: binding.finishEnabled, finishAction: 'goal', finishLeadMinutes: binding.leadMinutes }, goal: { impulseMinutes: binding.impulseMinutes } }) }));
 vi.mock('../src/main/session/blocked-chats.js', () => ({ isChatBlocked: () => binding.blocked }));
@@ -790,6 +791,24 @@ describe('browser decision lifetime', () => {
     await claimBrowserInput(next.id, 'new-document', null);
     expect(await completeBrowserDecision(next.id, 'new-document', 'accepted', 'helper-new-chat')).toBe(true);
     await expect(second).resolves.toBe('accepted');
+  });
+  it('starts one new standalone helper after a restart lost the original Goal draft', async () => {
+    const controller = new AbortController();
+    const first = requestBrowserDecision('Review the account notice', controller.signal, { sourceSessionId: sessionId });
+    const old = (await listInputs())[0]!;
+    await claimBrowserInput(old.id, 'old-document', null);
+    controller.abort();
+    await expect(first).rejects.toThrow('cancelled');
+
+    expect(await startReplacementBrowserHelper(old.id, sessionId)).toBe(true);
+    const rows = await listInputs();
+    const replacement = rows.find(row => row.replacementHelper === true)!;
+    expect(replacement).toMatchObject({ purpose: 'decision', state: 'queued', decisionSourceSessionId: sessionId });
+    expect(replacement.id).not.toBe(old.id);
+    expect(rows.find(row => row.id === old.id)).toMatchObject({ state: 'failed', error: 'User authorized a new helper' });
+    expect(await claimBrowserInput(replacement.id, 'replacement-document', null)).toMatchObject({ id: replacement.id, state: 'browser' });
+    expect(await completeBrowserDecision(replacement.id, 'replacement-document', 'Check the unblock banner.', 'helper-replacement')).toBe(true);
+    expect(await startReplacementBrowserHelper(old.id, sessionId)).toBe(false);
   });
   it('reuses the exact helper target and keeps source input out of its queue', async () => {
     binding.activeTurnId = 'source-still-running';

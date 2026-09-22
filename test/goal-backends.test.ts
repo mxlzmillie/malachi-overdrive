@@ -1,8 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GOAL_CONTINUATIONS, GOAL_MARKER_INSTRUCTION, templateGoalDecision } from '../src/shared/goal-templates.js';
 import { promises as fs } from 'node:fs';
-const browser = vi.hoisted(() => ({ request: vi.fn(), authorize: vi.fn() }));
-vi.mock('../src/main/session/input.js', () => ({ requestBrowserDecision: browser.request, authorizeBrowserHelperRetry: browser.authorize, listInputs: async () => [] }));
+const browser = vi.hoisted(() => ({ request: vi.fn(), authorize: vi.fn(), replacement: vi.fn() }));
+vi.mock('../src/main/session/input.js', () => ({ requestBrowserDecision: browser.request, authorizeBrowserHelperRetry: browser.authorize, startReplacementBrowserHelper: browser.replacement, listInputs: async () => [] }));
 vi.mock('electron', () => ({
   app: { getPath: () => '', getVersion: () => '0.0.0' },
   safeStorage: {
@@ -30,6 +30,7 @@ beforeEach(async () => {
   goal.resetGoalStateForTests();
   browser.request.mockReset();
   browser.authorize.mockReset();
+  browser.replacement.mockReset();
   await setSecret('openRouterApiKey', '');
   await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'templates', loopBackend: 'api' } });
   vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('unexpected API request'); }));
@@ -145,6 +146,14 @@ async function settled(id: string) {
   return view()!;
 }
 describe('Goal decision backends', () => {
+  it('starts a fresh standalone helper when the user retries after restart', async () => {
+    const conversationId = 'restart-replacement-helper';
+    const sessionId = await recording(conversationId, 'Review the account restriction without sending outreach');
+    browser.replacement.mockResolvedValueOnce(true);
+    expect(await goal.retryGoalBrowserHelper(sessionId, 'cancelled-input')).toBe(true);
+    expect(browser.replacement).toHaveBeenCalledWith('cancelled-input', sessionId);
+    expect(browser.request).not.toHaveBeenCalled();
+  });
   it('restarts only the deliberately authorized failed source helper', async () => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'chatgpt' } });
     const id = 'source-retry-helper';

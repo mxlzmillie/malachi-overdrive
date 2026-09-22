@@ -11,6 +11,17 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.27] — 2026-09-22
+
+- Fixed **Start a new helper** after an ambiguous helper delivery or an app restart. The button now
+  creates one fresh isolated helper with a new ownership claim instead of only clearing the old
+  retry fence.
+- Replacement helpers preserve the source task context, carry a no-outreach safety boundary for
+  account-restriction recovery, and write their result into the original MALACHI OVERDRIVE task
+  without typing a new ChatGPT message there.
+
+See [the full release notes](docs/release-notes/v2.0.27.md).
+
 ## [2.0.26] — 2026-09-22
 
 - Completed the first-window proof: a sole queried tab is required even before the guarded

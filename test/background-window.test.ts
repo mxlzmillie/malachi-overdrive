@@ -8,6 +8,8 @@ type Tab = { id: number; windowId: number; url: string; active?: boolean; index?
 function harness(initial: Tab[], cached?: number) {
   const tabs = new Map(initial.map(tab => [tab.id, { ...tab }]));
   const windows = new Map([...new Set(initial.map(tab => tab.windowId))].map(id => [id, { id, state: 'minimized', focused: false }]));
+  const documents: Record<string, string> = {};
+  const epochs: Record<string, number> = {};
   const stored: Record<string, unknown> = cached === undefined ? {} : { chatBackgroundWindow: cached, chatBackgroundTabs: initial.filter(tab => tab.windowId === cached).map(tab => tab.id) };
   let next = 100;
   const create = vi.fn(async (options: { url: string; windowId: number }) => {
@@ -21,6 +23,11 @@ function harness(initial: Tab[], cached?: number) {
   const get = vi.fn(async (id: number) => ({ ...tabs.get(id)! }));
   const update = vi.fn(async (id: number, patch: Partial<Tab>) => {
     const tab = tabs.get(id)!; Object.assign(tab, patch); return { ...tab };
+  });
+  const remove = vi.fn(async (id: number) => {
+    const windowId = tabs.get(id)?.windowId;
+    tabs.delete(id);
+    if (windowId != null && ![...tabs.values()].some(tab => tab.windowId === windowId)) windows.delete(windowId);
   });
   const windowCreate = vi.fn(async (options: { url?: string; tabId?: number; focused?: boolean; state?: string }) => {
     const id = next++;
@@ -37,13 +44,20 @@ function harness(initial: Tab[], cached?: number) {
     const window = windows.get(id)!; Object.assign(window, patch); return { ...window };
   });
   const call = vi.fn(async () => ({ ok: true, data: { ok: true } }));
-  const sendMessage = vi.fn(async () => ({ safe: true }));
+  const sendMessage = vi.fn(async (): Promise<{ safe: boolean; conversationId?: string | null; navigationEpoch?: number }> => ({ safe: true }));
+  const query = vi.fn(async (filter?: { windowId?: number; active?: boolean }) => [...tabs.values()]
+    .filter(tab => (filter?.windowId === undefined || tab.windowId === filter.windowId) &&
+      (filter?.active !== true || tab.active === true))
+    .map(tab => ({ ...tab })));
   const api = vm.runInNewContext(`${code}\n({ createChatTab, reconcileBackgroundWindow, revealWorkerChat, recoverSelectedChatTab })`, {
     URL, URLSearchParams, Promise, setTimeout, clearTimeout, maintain: async () => undefined,
     commandMarkerId: (value: unknown) => typeof value === 'string' ? value : null,
     isChatGptUrl: (url: string) => url.startsWith('https://chatgpt.com/'), cleanConversationId: (value: unknown) => typeof value === 'string' ? value : null,
     conversationForTab: (tab: Tab) => new URL(tab.url).pathname.match(/^\/c\/(.+)$/)?.[1] ?? null,
     CHATGPT_TAB_URLS: ['https://chatgpt.com/*'], call,
+    tabDocuments: documents, tabEpochs: epochs,
+    ownsDocument: (source: { tab: number; documentId?: string; navigationEpoch?: number }) =>
+      Boolean(source.documentId && documents[String(source.tab)] === source.documentId && epochs[String(source.tab)] === source.navigationEpoch),
     chrome: {
       runtime: { getURL: (path: string) => `chrome-extension://test/${path}` },
       storage: { session: {
@@ -51,16 +65,13 @@ function harness(initial: Tab[], cached?: number) {
         set: async (values: object) => { Object.assign(stored, values); },
         remove: async (key: string) => { delete stored[key]; }
       } },
-      tabs: { query: async (filter?: { windowId?: number; active?: boolean }) => [...tabs.values()]
-        .filter(tab => (filter?.windowId === undefined || tab.windowId === filter.windowId) &&
-          (filter?.active !== true || tab.active === true))
-        .map(tab => ({ ...tab })), create, move, get, update, sendMessage },
+      tabs: { query, create, move, get, update, remove, sendMessage },
       windows: { create: windowCreate, update: windowUpdate, get: async (id: number) => {
         if (!windows.has(id)) throw new Error('Window closed'); return windows.get(id);
       } }
     }
   }) as { createChatTab(url: string, background: boolean, active?: boolean): Promise<Tab>; reconcileBackgroundWindow(policy: object): Promise<boolean>; revealWorkerChat(request: object): Promise<void>; recoverSelectedChatTab(request: object, sender: object): Promise<{ ok: boolean; error?: string }> };
-  return { ...api, tabs, windows, stored, create, move, get, update, windowCreate, windowUpdate, call, sendMessage };
+  return { ...api, tabs, windows, documents, epochs, stored, create, move, get, query, update, remove, windowCreate, windowUpdate, call, sendMessage };
 }
 const policy = { background: true, managedConversations: ['main', 'worker'] };
 
@@ -98,6 +109,296 @@ it('serializes concurrent first tabs into one minimized unfocused window', async
   expect(app.windowCreate).toHaveBeenCalledWith(expect.objectContaining({ state: 'minimized', focused: false }));
   expect(app.windowUpdate).not.toHaveBeenCalled();
   expect(tabs[0]?.windowId).toBe(tabs[1]?.windowId);
+});
+
+it('accepts a minimized first window whose create result omits the optional tabs list', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    return { ...created, tabs: undefined as never };
+  });
+  const tab = await app.createChatTab('https://chatgpt.com/?cos-input=new', true);
+  expect(app.stored.chatBackgroundWindow).toBe(tab.windowId);
+  expect(app.stored.chatBackgroundTabs).toEqual([tab.id]);
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.windowUpdate).not.toHaveBeenCalled();
+});
+
+it('waits for the first tab to appear in the window query when Opera omitted the create tabs', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => ({ ...await originalCreate(options), tabs: undefined as never }));
+  app.query.mockResolvedValueOnce([]);
+  const tab = await app.createChatTab('https://chatgpt.com/?cos-input=delayed', true);
+  expect(app.stored.chatBackgroundWindow).toBe(tab.windowId);
+  expect(app.stored.chatBackgroundTabs).toEqual([tab.id]);
+  expect(app.stored.chatBackgroundOpening).toBeNull();
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+});
+
+it('minimizes only the exact unfocused Opera window when its initial state remains normal', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  const originalUpdate = app.windowUpdate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: false });
+    return { ...created, state: 'normal', tabs: undefined as never };
+  });
+  app.windowUpdate.mockImplementationOnce(async (id, patch) => {
+    await originalUpdate(id, patch);
+    return { id, state: 'normal', focused: false };
+  });
+  const tab = await app.createChatTab('https://chatgpt.com/?cos-input=new', true);
+  expect(app.windowCreate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ state: 'minimized', focused: false }));
+  expect(app.windowUpdate).toHaveBeenCalledExactlyOnceWith(tab.windowId, { state: 'minimized', focused: false });
+  expect(app.stored.chatBackgroundWindow).toBe(tab.windowId);
+  expect(app.stored.chatBackgroundTabs).toEqual([tab.id]);
+  expect(app.move).not.toHaveBeenCalled();
+});
+
+it('waits for a delayed minimized state after Opera accepts the one update', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: false });
+    return created;
+  });
+  app.windowUpdate.mockImplementationOnce(async (id) => {
+    setTimeout(() => Object.assign(app.windows.get(id)!, { state: 'minimized' }), 150);
+    return { id, state: 'normal', focused: false };
+  });
+  const tab = await app.createChatTab('https://chatgpt.com/?cos-input=new', true);
+  expect(app.windowUpdate).toHaveBeenCalledExactlyOnceWith(tab.windowId, { state: 'minimized', focused: false });
+  expect(app.stored.chatBackgroundWindow).toBe(tab.windowId);
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+});
+
+it('waits for the exact pending URL while the new tab is briefly blank', async () => {
+  const app = harness([]);
+  const url = 'https://chatgpt.com/?cos-input=new';
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    const tab = app.tabs.get(created.tabs[0]!.id)!;
+    tab.url = '';
+    setTimeout(() => { tab.url = url; }, 150);
+    return created;
+  });
+  const tab = await app.createChatTab(url, true);
+  expect(app.stored.chatBackgroundTabs).toEqual([tab.id]);
+  expect(app.windowUpdate).not.toHaveBeenCalled();
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+});
+
+it('keeps a still-normal Opera window unowned after one bounded minimize attempt', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: false });
+    return created;
+  });
+  app.windowUpdate.mockImplementationOnce(async (id) => ({ id, state: 'normal', focused: false }));
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=new', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  expect(app.windowUpdate).toHaveBeenCalledTimes(1);
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.stored.chatBackgroundWindow).toBeUndefined();
+  expect(app.remove).not.toHaveBeenCalled();
+  expect(app.stored.chatBackgroundOpening).toMatchObject({ windowId: 100, tabId: 101 });
+});
+
+it('does not create another window while an earlier one remains unproven after retries', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: false });
+    return created;
+  });
+  app.windowUpdate.mockImplementation(async id => ({ id, state: 'normal', focused: false }));
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=first', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=second', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.tabs.size).toBe(1);
+  expect(app.stored.chatBackgroundOpening).toMatchObject({ windowId: 100, tabId: 101 });
+}, 10000);
+
+it('never adopts a previously failed window even if it later appears minimized', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: false });
+    return created;
+  });
+  app.windowUpdate.mockImplementationOnce(async id => ({ id, state: 'normal', focused: false }));
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=first', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  Object.assign(app.windows.get(100)!, { state: 'minimized' });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=second', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  expect(app.stored.chatBackgroundWindow).toBeUndefined();
+  expect(app.stored.chatBackgroundOpening).toMatchObject({ windowId: 100, tabId: 101 });
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+});
+
+it('cannot make another window after a provisional one becomes focused', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: true });
+    return created;
+  });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=first', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  Object.assign(app.windows.get(100)!, { state: 'minimized', focused: false });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=second', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.remove).not.toHaveBeenCalled();
+});
+
+it('creates a new isolated window only after the previous failed window is closed', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: true });
+    return created;
+  });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=first', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  app.tabs.delete(101);
+  app.windows.delete(100);
+  const tab = await app.createChatTab('https://chatgpt.com/?cos-input=second', true);
+  expect(tab.windowId).not.toBe(100);
+  expect(app.windowCreate).toHaveBeenCalledTimes(2);
+  expect(app.stored.chatBackgroundOpening).toBeNull();
+});
+
+it('does not adopt a tab that navigates during Opera window minimization', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  const originalUpdate = app.windowUpdate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: false });
+    return created;
+  });
+  app.windowUpdate.mockImplementationOnce(async (id, patch) => {
+    const updated = await originalUpdate(id, patch);
+    const tab = [...app.tabs.values()].find(row => row.windowId === id)!;
+    tab.url = 'https://example.com/private';
+    return updated;
+  });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=new', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  expect(app.windowUpdate).toHaveBeenCalledTimes(1);
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.stored.chatBackgroundWindow).toBeUndefined();
+  expect(app.remove).not.toHaveBeenCalled();
+});
+
+it('rejects a new window whose only tab changed URL before ownership was recorded', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    app.tabs.get(created.tabs[0]!.id)!.url = 'https://example.com/private';
+    return created;
+  });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=new', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  expect(app.stored.chatBackgroundWindow).toBeUndefined();
+  expect(app.remove).not.toHaveBeenCalled();
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.windowUpdate).not.toHaveBeenCalled();
+});
+
+it('does not own or close a new window containing an extra tab', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    app.tabs.set(999, { id: 999, windowId: created.id, url: 'https://example.com/private' });
+    return created;
+  });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=new', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  expect(app.stored.chatBackgroundWindow).toBeUndefined();
+  expect(app.remove).not.toHaveBeenCalled();
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+});
+
+it('does not own or close a new window the browser focused', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    Object.assign(app.windows.get(created.id)!, { state: 'normal', focused: true });
+    return created;
+  });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=new', true)).rejects.toThrow('BACKGROUND_UNAVAILABLE');
+  expect(app.stored.chatBackgroundWindow).toBeUndefined();
+  expect(app.remove).not.toHaveBeenCalled();
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.windowUpdate).not.toHaveBeenCalled();
+});
+
+it('retires a failed first-window verification only after exact idle document proof', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    const tab = created.tabs[0]!;
+    app.documents[String(tab.id)] = 'fresh-document';
+    app.epochs[String(tab.id)] = 0;
+    return created;
+  });
+  app.get.mockRejectedValueOnce(new Error('transient tab verification failure'));
+  app.sendMessage.mockResolvedValueOnce({ safe: true, conversationId: null, navigationEpoch: 0 });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=new', true)).rejects.toThrow('transient tab verification failure');
+  expect(app.remove).toHaveBeenCalledTimes(1);
+  expect(app.stored.chatBackgroundWindow).toBeUndefined();
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.windowUpdate).not.toHaveBeenCalled();
+});
+
+it('keeps the failed first-window tab when its document has a draft', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    const tab = created.tabs[0]!;
+    app.documents[String(tab.id)] = 'draft-document';
+    app.epochs[String(tab.id)] = 0;
+    return created;
+  });
+  app.get.mockRejectedValueOnce(new Error('transient tab verification failure'));
+  app.sendMessage.mockResolvedValueOnce({ safe: false, conversationId: null, navigationEpoch: 0 });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=new', true)).rejects.toThrow('transient tab verification failure');
+  expect(app.remove).not.toHaveBeenCalled();
+  expect(app.windowCreate).toHaveBeenCalledTimes(1);
+  expect(app.stored.chatBackgroundOpening).toMatchObject({ windowId: 100, tabId: 101 });
+});
+
+it('never closes a replacement tab after the first-window verification throws', async () => {
+  const app = harness([]);
+  const originalCreate = app.windowCreate.getMockImplementation()!;
+  app.windowCreate.mockImplementationOnce(async options => {
+    const created = await originalCreate(options);
+    const tab = created.tabs[0]!;
+    app.documents[String(tab.id)] = 'old-document';
+    app.epochs[String(tab.id)] = 0;
+    return created;
+  });
+  app.get.mockImplementationOnce(async id => {
+    app.tabs.delete(id);
+    app.tabs.set(999, { id: 999, windowId: 100, url: 'https://chatgpt.com/?cos-input=new' });
+    app.documents['999'] = 'replacement-document';
+    app.epochs['999'] = 0;
+    throw new Error('the elected tab was replaced');
+  });
+  app.sendMessage.mockResolvedValueOnce({ safe: true, conversationId: null, navigationEpoch: 0 });
+  await expect(app.createChatTab('https://chatgpt.com/?cos-input=new', true)).rejects.toThrow('the elected tab was replaced');
+  expect(app.remove).not.toHaveBeenCalled();
+  expect(app.stored.chatBackgroundOpening).toMatchObject({ windowId: 100, tabId: 101 });
 });
 
 it('does not evict a live owned task after hundreds of closed helper tabs', async () => {

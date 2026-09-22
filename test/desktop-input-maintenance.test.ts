@@ -331,12 +331,19 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     });
     await h.maintain(); expect(h.remove).not.toHaveBeenCalled();
   });
-  it('creates already minimized without an initial foreground frame', async () => {
+  it('requests a minimized window and confirms Opera delayed minimization without focusing it', async () => {
     const h = await worker([{ id: firstId, conversationId: null }]);
     h.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ app: 'chat-on-steroids', bridge: BRIDGE_PROTOCOL, compatible: true, paired: true, ok: true, inputs: [{ id: firstId, conversationId: null }], background: true, browserWindowBounds: { left: -1510, top: 220, width: 800, height: 600 } }) });
+    h.windows.get.mockResolvedValueOnce({ id: 80, state: 'normal', focused: false });
+    const originalUpdate = h.windows.update.getMockImplementation()!;
+    h.windows.update.mockImplementationOnce(async (id, patch) => {
+      await originalUpdate(id, patch);
+      return { id, state: 'normal', focused: false };
+    });
     await h.maintain();
     expect(h.windows.create).toHaveBeenCalledWith(expect.objectContaining({ focused: false, state: 'minimized' }));
-    expect(h.windows.update).not.toHaveBeenCalled();
+    expect(h.windows.update).toHaveBeenCalledExactlyOnceWith(80, { state: 'minimized', focused: false });
+    expect(h.saved.chatBackgroundWindow).toBe(80);
   });
   it('reuses an idle conversation without opening or navigating a helper', async () => {
     const h = await worker([]);
@@ -670,6 +677,8 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     h.create.mockRejectedValueOnce(new Error('tab failed'));
     await expect(h.createChatTab('https://chatgpt.com/?third', true)).rejects.toThrow('tab failed');
     expect(h.windows.create).toHaveBeenCalledTimes(1);
+    // A closed window has no resident tabs when Chrome allocates its replacement.
+    h.tabs.splice(0, h.tabs.length, ...h.tabs.filter(tab => tab.windowId !== 80));
     h.windows.get.mockRejectedValueOnce(new Error('window closed'));
     await h.createChatTab('https://chatgpt.com/?fourth', true);
     expect(h.windows.create).toHaveBeenCalledTimes(2);

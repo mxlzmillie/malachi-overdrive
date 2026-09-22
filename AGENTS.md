@@ -2189,10 +2189,15 @@ later delivered follow-up supersedes that cancellation. Superseded sources and r
 copies remain separately eligible. Fresh document, journal, draft and generation checks still gate
 every close. App-owned root/helper tabs with an exact terminal operation marker may retire after
 a 60-second first-observed terminal grace, provided a fresh page proof confirms no draft, send or
-generation; the model catalog keeps its elected warm helper. Task windows are created already
-minimized, without a foreground-create
-or create-then-minimize fallback. If the browser cannot supply an isolated background surface,
+generation; the model catalog keeps its elected warm helper. Task windows request minimized,
+unfocused creation. If Opera reports the exact new one-tab ChatGPT window as normal and unfocused,
+one guarded minimize update is allowed before ownership is recorded; a fresh minimized proof is
+required. There is no foreground-create fallback. If the browser cannot supply an isolated background surface,
 delivery fails with `BACKGROUND_UNAVAILABLE`; it never opens an OS browser as a substitute.
+An unconfirmed first window is pinned provisionally in browser-session storage. Later operations
+cannot create a second window while it exists or adopt it after a period of unobserved browser
+activity. Only fresh minimized/unfocused single-tab proof during the original placement promotes
+it to owned custody, and only exact idle/no-draft document proof can retire it at that failure.
 Existing owned background windows are reused without changing their state or geometry; a
 temporary planner stays until its replacement is established. Desktop input claims and worker
 command redemptions require the authenticated companion's current `isolated: true` proof.

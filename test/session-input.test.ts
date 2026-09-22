@@ -1311,7 +1311,10 @@ it('delivers a legacy finish checkpoint after an ordinary turn without restoring
 it('records an isolation refusal before any browser payload or send authorization', async () => {
   const row = await enqueueInput(input({ sessionId: null }));
   expect(await refuseBrowserInputIsolation(row.id, '', null)).toBe(true);
-  expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({ state: 'failed', error: expect.stringContaining('BACKGROUND_UNAVAILABLE') });
+  expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({
+    state: 'failed',
+    error: 'BACKGROUND_UNAVAILABLE: Opera could not confirm a private background ChatGPT window. Your message was not sent. If retry still fails, close the stalled app-created ChatGPT window in Opera and retry.'
+  });
   expect(await claimBrowserInput(row.id, 'other-document', null, true)).toBeNull();
 });
 
@@ -1329,6 +1332,10 @@ it('rejects isolation failures for another conversation or another claimed docum
   expect(await refuseBrowserInputIsolation(row.id, 'other-document', binding.conversationId)).toBe(false);
   expect(await refuseBrowserInputIsolation(row.id, 'exact-document', 'wrong-conversation')).toBe(false);
   expect(await refuseBrowserInputIsolation(row.id, 'exact-document', binding.conversationId)).toBe(true);
+  expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({
+    state: 'failed',
+    error: expect.stringContaining('Reconnect this task chat')
+  });
 });
 
 

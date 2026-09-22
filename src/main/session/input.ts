@@ -574,7 +574,9 @@ export function refuseBrowserInputIsolation(id: string, owner: string, conversat
     if (!entry || !['queued', 'browser'].includes(entry.state) || entry.sendAuthorizedAt !== undefined ||
         (entry.state === 'browser' && (entry.owner !== owner || entry.requiresAuthorization !== true)) ||
         await target(entry) !== conversationId) return false;
-    const error = 'BACKGROUND_UNAVAILABLE: this task lost its isolated app window. Open its ChatGPT tab in Opera, click the MALACHI OVERDRIVE companion → Reconnect this task chat, then retry.';
+    const error = !entry.sessionId && !entry.conversationId
+      ? 'BACKGROUND_UNAVAILABLE: Opera could not confirm a private background ChatGPT window. Your message was not sent. If retry still fails, close the stalled app-created ChatGPT window in Opera and retry.'
+      : 'BACKGROUND_UNAVAILABLE: this task lost its isolated app window. Open its ChatGPT tab in Opera, click the MALACHI OVERDRIVE companion → Reconnect this task chat, then retry.';
     await commit(current.map(row => row === entry ? { ...row, state: 'failed', error } : row));
     decisionWaiters.get(id)?.reject(new Error('BACKGROUND_UNAVAILABLE'));
     decisionWaiters.delete(id);

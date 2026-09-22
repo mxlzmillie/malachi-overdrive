@@ -11,6 +11,17 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.25] — 2026-09-22
+
+- Confirmed Opera's newly created chat window from a fresh physical tab/window read, including
+  delayed tab creation and minimization, before handing it a message.
+- Pinned an unconfirmed first window across companion worker suspension so retries cannot open
+  a series of extra browser windows or adopt one with uncertain history.
+- Gave new-chat background failures an accurate unsent-message explanation while retaining the
+  explicit reconnect path for an existing task whose isolated window was lost.
+
+See [the full release notes](docs/release-notes/v2.0.25.md).
+
 ## [2.0.24] — 2026-09-21
 
 - Added an explicit no-account, no-key Kilo Free source for Goal and Loop, with a live check that

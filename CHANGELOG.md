@@ -11,6 +11,12 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.29] — 2026-09-22
+
+- Fixed macOS startup after an in-place update by selecting MALACHI OVERDRIVE’s durable workspace path before Electron acquires its single-instance lock. The app now opens the existing workspace instead of silently leaving a second transient profile.
+
+See [the full release notes](docs/release-notes/v2.0.29.md).
+
 ## [2.0.28] — 2026-09-22
 
 - Restored the **Start a new helper** action for a narrow historical state left by older releases:

@@ -106,6 +106,14 @@ let automaticUpdateTimer: NodeJS.Timeout | null = null;
 
 const AUTO_UPDATE_POLL_MS = 30_000;
 
+// macOS normally derives this from the display name supplied by LaunchServices. That name can
+// differ while an app bundle is being replaced, which makes Electron select a second profile and
+// leave the real workspace looking as though it never launched. The profile name is a durable app
+// identity, so choose it explicitly before Electron creates its single-instance lock.
+if (process.platform === 'darwin') {
+  app.setPath('userData', path.join(app.getPath('appData'), 'chat-on-steroids'));
+}
+
 // One instance only: two copies would fight over the tunnel and the config file.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {

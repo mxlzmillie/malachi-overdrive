@@ -439,6 +439,10 @@ class FakeStorageArea {
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     this.data = next;
   }
+
+  async remove(keys: string | string[]): Promise<void> {
+    for (const key of Array.isArray(keys) ? keys : [keys]) delete this.data[key];
+  }
 }
 
 interface WorkerHarness {
@@ -498,7 +502,7 @@ function loadWorker(options: {
   windowsGet?: (windowId: number) => Promise<{ focused?: boolean }>;
 }): WorkerHarness {
   let listener: ((message: any, sender: any, sendResponse: (value: any) => void) => boolean) | null = null;
-  const tabRemovedListeners: Array<(tabId: number) => void> = [];
+  const tabRemovedListeners: Array<(tabId: number, removeInfo?: { windowId: number; isWindowClosing: boolean }) => void> = [];
   const tabCreatedListeners: Array<(tab: { id?: number; url?: string; pendingUrl?: string }) => void> = [];
   const tabUpdatedListeners: Array<(tabId: number, changeInfo: { url?: string; status?: string }) => void> = [];
   const installedListeners: Array<(details: { reason: string }) => void> = [];
@@ -586,7 +590,7 @@ function loadWorker(options: {
         }
       },
       onRemoved: {
-        addListener(fn: (tabId: number) => void) {
+        addListener(fn: (tabId: number, removeInfo?: { windowId: number; isWindowClosing: boolean }) => void) {
           tabRemovedListeners.push(fn);
         }
       },
@@ -645,8 +649,10 @@ function loadWorker(options: {
       for (let turn = 0; turn < 6; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
     },
     async closeTab(tabId: number) {
+      const windowId = knownTabs.get(tabId)?.windowId;
       knownTabs.delete(tabId);
-      for (const fn of tabRemovedListeners) fn(tabId);
+      const isWindowClosing = windowId !== undefined && ![...knownTabs.values()].some(tab => tab.windowId === windowId);
+      for (const fn of tabRemovedListeners) fn(tabId, windowId === undefined ? undefined : { windowId, isWindowClosing });
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
     },
@@ -1079,13 +1085,24 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     await worker.send({ type: 'bind', conversationId: CHAT }, 71);
 
     await worker.closeTab(71);
-    for (let turn = 0; turn < 8; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(worker.tabsCreate).toHaveBeenCalledTimes(1));
 
     expect(worker.tabsCreate).toHaveBeenCalledTimes(1);
     expect(worker.tabsCreate).toHaveBeenCalledWith(expect.objectContaining({ url: `https://chatgpt.com/c/${CHAT}`, active: false }));
     expect(asked.filter((item) => item !== 'status')).toEqual(['repaired:close-repair']);
     expect(asked[0]).toBe('status');
     expect(worker.alarmClear).not.toHaveBeenCalled();
+  });
+
+  it('retains window custody when one of its two task tabs closes', async () => {
+    const session = new FakeStorageArea({ chatBackgroundWindow: 7, chatBackgroundTabs: [71, 72] });
+    const worker = loadWorker({ ownedWindow: true, local: new FakeStorageArea(paired), session });
+    await worker.createTab({ id: 71, url: `https://chatgpt.com/c/${CHAT}` });
+    await worker.createTab({ id: 72, url: `https://chatgpt.com/c/${OTHER}` });
+    await worker.registerTab(71);
+    await worker.closeTab(71);
+    await vi.waitFor(() => expect((session.data.terminalDocuments as Record<string, unknown>)['71']).toBeDefined());
+    expect(session.data.chatBackgroundWindow).toBe(7);
   });
 
   /**

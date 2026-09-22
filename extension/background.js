@@ -1638,6 +1638,7 @@ async function noteTabConversation(source, value) {
  * that is worth placing behind the app's per-chat cooldown.
  */
 let backgroundWindowFlight = null;
+const focusedBackgroundWindows = new Set();
 /** One serialized owner for isolated window adoption and new tab placement. */
 function inBackgroundWindow(work) {
   const flight = (backgroundWindowFlight || Promise.resolve()).catch(() => undefined).then(work);
@@ -1645,8 +1646,10 @@ function inBackgroundWindow(work) {
   return flight.finally(() => { if (backgroundWindowFlight === flight) backgroundWindowFlight = null; });
 }
 async function storedBackgroundWindow() {
-  const { chatBackgroundWindow: id, chatBackgroundTabs = [] } = await chrome.storage.session.get(['chatBackgroundWindow', 'chatBackgroundTabs']);
+  const { chatBackgroundWindow: id, chatBackgroundTabs = [], chatBackgroundRevokedWindows = [] } =
+    await chrome.storage.session.get(['chatBackgroundWindow', 'chatBackgroundTabs', 'chatBackgroundRevokedWindows']);
   if (!Number.isInteger(id)) return null;
+  if (focusedBackgroundWindows.has(id) || chatBackgroundRevokedWindows.includes(id)) return null;
   try {
     const window = await chrome.windows.get(id);
     // Ownership is custody of a hidden work surface, not merely memory of a window id.
@@ -1654,15 +1657,23 @@ async function storedBackgroundWindow() {
     // permanently removes it from automatic background delivery until a fresh minimized
     // surface is elected. Otherwise the next worker/input can silently reuse the window the
     // user is actively looking at, turning an intentional reveal into foreground automation.
-    if (window.state !== 'minimized' || window.focused !== false) return null;
+    if (window.focused !== false) return null;
+    if (window.state !== 'minimized')
+      throw new Error('BACKGROUND_UNAVAILABLE: the owned browser window is not yet minimized');
     const tabs = (await chrome.tabs.query({ windowId: id })).filter(tab => tab.windowId === id);
+    if (!tabs.length || tabs.some(tab => !tab.pendingUrl && (!tab.url || tab.url === 'about:blank')))
+      throw new Error('BACKGROUND_UNAVAILABLE: the owned browser tabs could not be verified');
     // Cached window identity is insufficient: every physical tab must also be one
     // this browser session created or restored from an exact live operation marker.
-    if (!tabs.length || tabs.some(tab => !isChatGptUrl(tab.pendingUrl || tab.url || '') ||
+    if (tabs.some(tab => !isChatGptUrl(tab.pendingUrl || tab.url || '') ||
       !chatBackgroundTabs.includes(tab.id))) return null;
     return window;
   }
-  catch { await chrome.storage.session.remove('chatBackgroundWindow'); return null; }
+  catch {
+    // A temporary Opera API failure cannot revoke physical custody and authorize
+    // another window. The real window-removal event clears this ID when it closes.
+    throw new Error('BACKGROUND_UNAVAILABLE: the owned browser window could not be verified');
+  }
 }
 /** Reconstruct ownership from the app's existing tab policy after extension reload or
  * OS browser startup. A cached window id alone never survives a browser restart. */
@@ -1685,7 +1696,11 @@ async function reconcileBackgroundWindow(policy) {
     } catch { return false; }
   };
   return inBackgroundWindow(async () => {
-    let window = await storedBackgroundWindow();
+    let window;
+    try { window = await storedBackgroundWindow(); }
+    catch { return false; }
+    const { chatBackgroundOpening: opening, chatBackgroundRevokedWindows = [] } =
+      await chrome.storage.session.get(['chatBackgroundOpening', 'chatBackgroundRevokedWindows']);
     const tabs = await chrome.tabs.query({});
     const owned = tabs.filter(tab => Number.isInteger(tab.id) && Number.isInteger(tab.windowId) && owns(tab));
     if (!window) {
@@ -1694,6 +1709,9 @@ async function reconcileBackgroundWindow(policy) {
       // URLs, even in a minimized window, cannot distinguish personal duplicates.
       const ids = [...new Set(owned.map(tab => tab.windowId))].sort((a, b) => a - b);
       for (const id of ids) {
+        // A live operation marker cannot rescue an opening whose first-window
+        // proof failed; its history may have changed while the worker slept.
+        if (id === opening?.windowId || focusedBackgroundWindows.has(id) || chatBackgroundRevokedWindows.includes(id)) continue;
         if (tabs.some(tab => tab.windowId === id && !owns(tab))) continue;
         try { window = await chrome.windows.get(id); } catch { continue; }
         if (window.state !== 'minimized' || window.focused !== false) { window = null; continue; }
@@ -1712,12 +1730,8 @@ async function confirmCreatedChatWindow(opening) {
   let minimizeRequested = false;
   let deadline = Date.now() + 2000;
   for (;;) {
-    let window;
-    try { window = await chrome.windows.get(opening.windowId); }
-    catch {
-      await chrome.storage.session.remove('chatBackgroundOpening');
-      return null;
-    }
+    // A transient API error is not evidence that the physical window closed.
+    const window = await chrome.windows.get(opening.windowId);
     const tabs = await chrome.tabs.query({ windowId: opening.windowId });
     // An initially empty query can precede the tab appearing in Opera. Once a tab was
     // elected, its disappearance is a lost surface rather than a new election.
@@ -1740,7 +1754,8 @@ async function confirmCreatedChatWindow(opening) {
       }
     }
     const actualUrl = tab?.pendingUrl || tab?.url || '';
-    if (window.focused !== false || (window.state !== 'normal' && window.state !== 'minimized') ||
+    if (focusedBackgroundWindows.has(opening.windowId) || window.focused !== false ||
+        (window.state !== 'normal' && window.state !== 'minimized') ||
         (actualUrl !== '' && actualUrl !== 'about:blank' &&
           (!isChatGptUrl(actualUrl) || new URL(actualUrl).href !== opening.url)))
       throw new Error('BACKGROUND_UNAVAILABLE: the created window changed before verification');
@@ -1752,7 +1767,7 @@ async function confirmCreatedChatWindow(opening) {
       });
       return tab;
     }
-    if (tab && window.state === 'normal' && exactUrl && !minimizeRequested) {
+    if (listed && tab && window.state === 'normal' && exactUrl && !minimizeRequested) {
       // Opera can report a newly requested minimized window as normal. This one
       // update is allowed only while it is still the exact unfocused new tab.
       await chrome.windows.update(opening.windowId, { state: 'minimized', focused: false });
@@ -1765,11 +1780,43 @@ async function confirmCreatedChatWindow(opening) {
   }
 }
 
+/** Only Chrome's confirmed window close clears physical window custody. */
+async function forgetClosedBackgroundWindow(windowId) {
+  return inBackgroundWindow(async () => {
+    focusedBackgroundWindows.delete(windowId);
+    const { chatBackgroundOpening: opening, chatBackgroundWindow: owned, chatBackgroundRevokedWindows = [] } =
+      await chrome.storage.session.get(['chatBackgroundOpening', 'chatBackgroundWindow', 'chatBackgroundRevokedWindows']);
+    if (opening?.windowId === windowId)
+      await chrome.storage.session.remove('chatBackgroundOpening');
+    if (owned === windowId)
+      await chrome.storage.session.remove('chatBackgroundWindow');
+    if (chatBackgroundRevokedWindows.includes(windowId))
+      await chrome.storage.session.set({ chatBackgroundRevokedWindows: chatBackgroundRevokedWindows.filter(id => id !== windowId) });
+  });
+}
+
+/** Revealing an unconfirmed surface permanently rules out later automatic cleanup. */
+async function noteFocusedBackgroundWindow(windowId) {
+  return inBackgroundWindow(async () => {
+    const { chatBackgroundOpening: opening, chatBackgroundWindow: owned, chatBackgroundRevokedWindows = [] } =
+      await chrome.storage.session.get(['chatBackgroundOpening', 'chatBackgroundWindow', 'chatBackgroundRevokedWindows']);
+    if (opening?.windowId === windowId || owned === windowId)
+      await chrome.storage.session.set({ chatBackgroundRevokedWindows: [...new Set([...chatBackgroundRevokedWindows, windowId])] });
+    if (opening?.windowId === windowId && !opening.revoked)
+      await chrome.storage.session.set({ chatBackgroundOpening: { ...opening, revoked: true } });
+    if (owned === windowId)
+      await chrome.storage.session.remove('chatBackgroundWindow');
+  });
+}
+
 /** A failed first-window proof may retire only its pinned, unchanged, idle document. */
 async function retireFailedCreatedChatWindow(opening) {
   const { windowId, tabId, url } = opening;
   if (!Number.isInteger(tabId)) return false;
   try {
+    const currentOpening = (await chrome.storage.session.get('chatBackgroundOpening')).chatBackgroundOpening;
+    if (currentOpening?.windowId !== windowId || currentOpening.tabId !== tabId ||
+        currentOpening.revoked || focusedBackgroundWindows.has(windowId)) return false;
     const window = await chrome.windows.get(windowId);
     const tabs = await chrome.tabs.query({ windowId });
     const tab = tabs.length === 1 ? tabs[0] : null;
@@ -1788,7 +1835,8 @@ async function retireFailedCreatedChatWindow(opening) {
     const resident = await chrome.tabs.query({ windowId });
     if ((currentWindow.state !== 'minimized' && currentWindow.state !== 'normal') || currentWindow.focused !== false || resident.length !== 1 ||
         resident[0].id !== tabId || current.windowId !== windowId || current.pendingUrl || current.url !== url ||
-        !ownsDocument(source)) return;
+        !ownsDocument(source) || focusedBackgroundWindows.has(windowId) ||
+        (await chrome.storage.session.get('chatBackgroundOpening')).chatBackgroundOpening?.revoked) return;
     await chrome.tabs.remove(tabId);
     await chrome.storage.session.remove('chatBackgroundOpening');
     return true;
@@ -1816,18 +1864,13 @@ async function createChatTab(url) {
       if (tab) return tab;
     }
     const { chatBackgroundOpening: provisional } = await chrome.storage.session.get('chatBackgroundOpening');
-    if (provisional && Number.isInteger(provisional.windowId) && typeof provisional.url === 'string' &&
-        (provisional.tabId === null || Number.isInteger(provisional.tabId))) {
+    if (provisional) {
       // Later state cannot prove that a window was never revealed or navigated
       // while this worker slept. A still-present failed opening blocks a second
-      // opening; only the initial call can elect and publish its window.
-      let window = null;
-      try { window = await chrome.windows.get(provisional.windowId); } catch { /* closed */ }
-      if (window)
+      // opening. Its exact idle document may be retired later, but a revealed,
+      // drafted, navigated or unresponsive one stays pinned until actual close.
+      if (!await retireFailedCreatedChatWindow(provisional))
         throw new Error('BACKGROUND_UNAVAILABLE: the previous browser window is still unconfirmed');
-      await chrome.storage.session.remove('chatBackgroundOpening');
-    } else if (provisional) {
-      await chrome.storage.session.remove('chatBackgroundOpening');
     }
     // Minimize in the creation call itself. Creating normally and hiding afterward
     // gives the browser a frame in which it can cover the user's current work.
@@ -1853,7 +1896,9 @@ async function createChatTab(url) {
 }
 
 async function isolatedWorkerTab(tab) {
-  const window = await storedBackgroundWindow();
+  let window;
+  try { window = await storedBackgroundWindow(); }
+  catch { return false; }
   if (!window || !tab || tab.windowId !== window.id || !isChatGptUrl(tab.pendingUrl || tab.url || '')) return false;
   const current = await chrome.tabs.get(tab.id).catch(() => null);
   return Boolean(current && current.windowId === window.id &&
@@ -3777,12 +3822,26 @@ function conversationForTab(tab) {
 
 // Document unload is not conversation lifetime. A real tab close is: reload keeps the
 // same tab id, while closing it wakes the service worker and retires only that tab's claim.
-chrome.tabs.onRemoved.addListener((id) => {
+chrome.tabs.onRemoved.addListener((id, removeInfo) => {
   clearDeferredRevivalOffersForTab(id);
   void serializeTab(id, async () => {
+    // Chrome may report a whole-window close with this exact tab event before
+    // windows.onRemoved runs. Clear its physical ID in this same transaction so
+    // a live repair can open one replacement immediately, independent of event order.
+    if (removeInfo?.isWindowClosing === true && Number.isInteger(removeInfo.windowId))
+      await forgetClosedBackgroundWindow(removeInfo.windowId);
     const documentId = await markTerminal(id);
     return releaseTab(id, null, documentId);
   }).catch(() => undefined);
+});
+
+chrome.windows.onRemoved?.addListener((id) => {
+  void forgetClosedBackgroundWindow(id).catch(() => undefined);
+});
+chrome.windows.onFocusChanged?.addListener((id) => {
+  if (!Number.isInteger(id) || id < 0) return;
+  focusedBackgroundWindows.add(id);
+  void noteFocusedBackgroundWindow(id).catch(() => undefined);
 });
 
 // A tab can survive while its ChatGPT document does not: navigating it to another site kills

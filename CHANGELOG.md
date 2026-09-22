@@ -11,7 +11,22 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
-## [2.0.25] — 2026-09-22
+## [2.0.26] — 2026-09-22
+
+- Completed the first-window proof: a sole queried tab is required even before the guarded
+  minimize request, and a temporary window API error cannot discard a still-present opening.
+- Confirmed window removal or Chrome's whole-window tab-close event now clears an unconfirmed
+  opening, so an active chat can repair in the same close transaction without leaving an old
+  window ID blocking its replacement.
+- A temporary lookup error for an already-owned window also retains its ID instead of
+  authorizing another opening. Brief empty-tab and normal/unfocused observations wait too.
+- A stalled first tab can be retired after it hydrates and proves idle, while an explicit reveal
+  revokes automatic custody across worker suspension and live-marker reconciliation.
+- Includes the 2.0.25 candidate changes below. No 2.0.25 GitHub release was published.
+
+See [the full release notes](docs/release-notes/v2.0.26.md).
+
+## [2.0.25] — 2026-09-22 (unpublished candidate)
 
 - Confirmed Opera's newly created chat window from a fresh physical tab/window read, including
   delayed tab creation and minimization, before handing it a message.

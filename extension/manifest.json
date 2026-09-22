@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MALACHI OVERDRIVE",
-  "version": "2.0.25",
+  "version": "2.0.26",
   "description": "Records your ChatGPT session into the local MALACHI OVERDRIVE app and labels its MCP tool calls with what they actually did.",
   "minimum_chrome_version": "116",
   "permissions": [

@@ -2197,7 +2197,13 @@ delivery fails with `BACKGROUND_UNAVAILABLE`; it never opens an OS browser as a 
 An unconfirmed first window is pinned provisionally in browser-session storage. Later operations
 cannot create a second window while it exists or adopt it after a period of unobserved browser
 activity. Only fresh minimized/unfocused single-tab proof during the original placement promotes
-it to owned custody, and only exact idle/no-draft document proof can retire it at that failure.
+it to owned custody. Later attempts may retire its exact unchanged tab only after idle/no-draft
+document proof, then open a replacement; they never promote its uncertain history to custody.
+An uncertain browser API error leaves both provisional and owned window IDs intact; the real
+window-removal event clears the corresponding ID. Window focus permanently revokes cached custody
+and disallows automatic retirement of a provisional tab, including across worker suspension.
+When Chrome reports `tabs.onRemoved` with `isWindowClosing`, that close proof also clears the
+corresponding ID before same-transaction repair; a mere empty tab query does not.
 Existing owned background windows are reused without changing their state or geometry; a
 temporary planner stays until its replacement is established. Desktop input claims and worker
 command redemptions require the authenticated companion's current `isolated: true` proof.

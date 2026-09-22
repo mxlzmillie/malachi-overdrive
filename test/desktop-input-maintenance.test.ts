@@ -148,8 +148,8 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
     },
     fetch, URL, URLSearchParams, AbortController, setTimeout, clearTimeout, TextEncoder, console
   });
-  vm.runInContext(`${source}\nglobalThis.testMaintenance = { load, maintain, releaseTab, serializeTab, noteTabConversation, createChatTab, isolatedWorkerTab, revealWorkerChat, inspectRequestedPluginRefresh, redeem: HANDLERS.redeem, authorizeDocument, ackDesktopInput, drainCommandAcks, inspectRequestedModels, desktopInput: HANDLERS.desktop_input, catalog: HANDLERS.model_catalog, events: HANDLERS.events, applyRequestedBrowserPreferences, pruneManagedTabs, settleRetirements: () => Promise.all([...tabRetirements.values()].map(retirement => retirement.promise)) };`, context);
-  const api = context.testMaintenance as { settleRetirements(): Promise<unknown>; pruneManagedTabs(...args: any[]): Promise<any>; releaseTab(...args: any[]): Promise<any>; serializeTab(tab: number, operation: () => Promise<any>): Promise<any>; noteTabConversation(source: any, conversationId: string): Promise<any>; applyRequestedBrowserPreferences(request: object): Promise<void>; authorizeDocument(sender: unknown, message: unknown): Promise<any>; catalog(message: unknown, sender: unknown, source: unknown): Promise<any>; load(): Promise<void>; maintain(woken?: boolean): Promise<void>; createChatTab(url: string, background: boolean): Promise<Tab> };
+  vm.runInContext(`${source}\nglobalThis.testMaintenance = { load, maintain, releaseTab, serializeTab, noteTabConversation, createChatTab, forgetClosedBackgroundWindow, isolatedWorkerTab, revealWorkerChat, inspectRequestedPluginRefresh, redeem: HANDLERS.redeem, authorizeDocument, ackDesktopInput, drainCommandAcks, inspectRequestedModels, desktopInput: HANDLERS.desktop_input, catalog: HANDLERS.model_catalog, events: HANDLERS.events, applyRequestedBrowserPreferences, pruneManagedTabs, settleRetirements: () => Promise.all([...tabRetirements.values()].map(retirement => retirement.promise)) };`, context);
+  const api = context.testMaintenance as { settleRetirements(): Promise<unknown>; pruneManagedTabs(...args: any[]): Promise<any>; releaseTab(...args: any[]): Promise<any>; serializeTab(tab: number, operation: () => Promise<any>): Promise<any>; noteTabConversation(source: any, conversationId: string): Promise<any>; applyRequestedBrowserPreferences(request: object): Promise<void>; authorizeDocument(sender: unknown, message: unknown): Promise<any>; catalog(message: unknown, sender: unknown, source: unknown): Promise<any>; load(): Promise<void>; maintain(woken?: boolean): Promise<void>; createChatTab(url: string, background: boolean): Promise<Tab>; forgetClosedBackgroundWindow(windowId: number): Promise<void> };
   await api.load();
   vm.runInContext('Object.assign(testMaintenance, { offerStopTurns, noteTabConversation, ackCommand })', context);
   return { ...api, update, get, inspectModels: (context.testMaintenance as any).inspectRequestedModels as (request: unknown, background: boolean) => Promise<void>, ackDesktopInput: (context.testMaintenance as any).ackDesktopInput as (...args: string[]) => Promise<any>, drainCommandAcks: (context.testMaintenance as any).drainCommandAcks as () => Promise<any>, desktopInput: (context.testMaintenance as any).desktopInput as (...args: any[]) => Promise<any>, events: (context.testMaintenance as any).events as (message: any, sender: any, source: any) => Promise<any>, create, sendMessage, tabs, fetch, windows, remove, reload, executeScript, insertCSS, local, localSaved, saved };
@@ -287,6 +287,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     await h.inspectModels(request, true);
     expect(h.create).toHaveBeenCalledTimes(1);
     h.tabs.length = 0;
+    await h.forgetClosedBackgroundWindow(80);
     await h.inspectModels(request, true); await h.inspectModels(request, true);
     expect(h.create).toHaveBeenCalledTimes(1);
     // Only a new explicit request can authorize another tab.
@@ -679,7 +680,7 @@ describe('one browser maintenance flight per desktop outbox publication', () => 
     expect(h.windows.create).toHaveBeenCalledTimes(1);
     // A closed window has no resident tabs when Chrome allocates its replacement.
     h.tabs.splice(0, h.tabs.length, ...h.tabs.filter(tab => tab.windowId !== 80));
-    h.windows.get.mockRejectedValueOnce(new Error('window closed'));
+    await h.forgetClosedBackgroundWindow(80);
     await h.createChatTab('https://chatgpt.com/?fourth', true);
     expect(h.windows.create).toHaveBeenCalledTimes(2);
   });

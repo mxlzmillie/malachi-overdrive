@@ -810,6 +810,27 @@ describe('browser decision lifetime', () => {
     expect(await completeBrowserDecision(replacement.id, 'replacement-document', 'Check the unblock banner.', 'helper-replacement')).toBe(true);
     expect(await startReplacementBrowserHelper(old.id, sessionId)).toBe(false);
   });
+  it('repairs the old one-shot authorization state without duplicating a later helper', async () => {
+    const controller = new AbortController();
+    const first = requestBrowserDecision('Review the account notice', controller.signal, { sourceSessionId: sessionId });
+    const old = (await listInputs())[0]!;
+    await claimBrowserInput(old.id, 'old-document', null);
+    controller.abort();
+    await expect(first).rejects.toThrow('cancelled');
+
+    // Versions before replacement helpers only persisted this terminal marker.
+    await writeDurableNow('session-input', (await listInputs()).map(row => row.id === old.id
+      ? { ...row, state: 'failed', error: 'User authorized a new helper' }
+      : row));
+    resetInputForTests();
+    expect(await pausedBrowserHelpers()).toEqual([{ id: old.id, sourceSessionId: sessionId }]);
+    expect(await startReplacementBrowserHelper(old.id, sessionId)).toBe(true);
+
+    const replacement = (await listInputs()).find(row => row.replacementHelper)!;
+    expect(replacement).toMatchObject({ state: 'queued', decisionSourceSessionId: sessionId });
+    expect(await pausedBrowserHelpers()).toEqual([]);
+    expect(await startReplacementBrowserHelper(old.id, sessionId)).toBe(false);
+  });
   it('reuses the exact helper target and keeps source input out of its queue', async () => {
     binding.activeTurnId = 'source-still-running';
     const controller = new AbortController();

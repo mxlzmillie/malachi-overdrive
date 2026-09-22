@@ -11,6 +11,15 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## Unreleased
 
+## [2.0.28] — 2026-09-22
+
+- Restored the **Start a new helper** action for a narrow historical state left by older releases:
+  the old helper was marked as authorized for replacement, but no replacement was created.
+- The repair permits exactly one fresh helper only when that failed record is the newest helper
+  decision for its task. Any later helper, active or terminal, closes the recovery path.
+
+See [the full release notes](docs/release-notes/v2.0.28.md).
+
 ## [2.0.27] — 2026-09-22
 
 - Fixed **Start a new helper** after an ambiguous helper delivery or an app restart. The button now

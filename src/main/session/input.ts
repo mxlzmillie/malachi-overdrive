@@ -773,8 +773,25 @@ export function offerToolInput(sessionId: string | null | undefined, conversatio
 
 export function resetInputForTests(): void { entries = null; chain = Promise.resolve(); offered.clear(); decisionWaiters.clear(); }
 
+/**
+ * The only durable state from which the UI may offer one replacement helper.
+ *
+ * Older releases changed an ambiguous cancellation to "User authorized a new
+ * helper" before creating its replacement. Treat that exact terminal shape as
+ * recoverable only while it remains the newest decision for its source. Any
+ * later decision, including a completed replacement, closes this recovery path
+ * forever and prevents duplicate helpers.
+ */
+function replacementCandidate(entry: InputEntry, all: InputEntry[]): boolean {
+  if (entry.purpose !== 'decision' || !entry.decisionSourceSessionId || entry.conversationId) return false;
+  if (entry.state !== 'cancelled' && !(entry.state === 'failed' && entry.error === 'User authorized a new helper')) return false;
+  return !all.some(other => other.id !== entry.id && other.decisionSourceSessionId === entry.decisionSourceSessionId &&
+    other.purpose === 'decision' && other.createdAt >= entry.createdAt);
+}
+
 export async function pausedBrowserHelpers(): Promise<Array<{ id: string; sourceSessionId: string }>> {
-  return (await listInputs()).filter(row => row.purpose === 'decision' && row.state === 'cancelled' && !row.conversationId && row.decisionSourceSessionId)
+  const current = await listInputs();
+  return current.filter(row => replacementCandidate(row, current))
     .map(row => ({ id: row.id, sourceSessionId: row.decisionSourceSessionId! }));
 }
 
@@ -786,7 +803,7 @@ export function authorizeBrowserHelperRetry(id: string, sourceSessionId: string)
     const row = current.find(entry => entry.id === id && entry.decisionSourceSessionId === sourceSessionId
       && entry.purpose === 'decision' && entry.state === 'cancelled' && !entry.conversationId);
     if (!row || current.some(entry => entry.decisionSourceSessionId === sourceSessionId && !terminal(entry))) return false;
-    await commit(current.map(entry => entry === row ? { ...entry, state: 'failed', error: 'User authorized a new helper' } : entry));
+    await commit(current.map(entry => entry === row ? { ...entry, state: 'failed', error: 'User authorized helper retry' } : entry));
     return true;
   });
 }
@@ -802,8 +819,7 @@ export function authorizeBrowserHelperRetry(id: string, sourceSessionId: string)
 export function startReplacementBrowserHelper(id: string, sourceSessionId: string): Promise<boolean> {
   return serial(async () => {
     const current = await load();
-    const row = current.find(entry => entry.id === id && entry.decisionSourceSessionId === sourceSessionId
-      && entry.purpose === 'decision' && entry.state === 'cancelled' && !entry.conversationId);
+    const row = current.find(entry => entry.id === id && entry.decisionSourceSessionId === sourceSessionId && replacementCandidate(entry, current));
     if (!row || current.some(entry => entry.decisionSourceSessionId === sourceSessionId && !terminal(entry))) return false;
 
     const prefix = 'This is a replacement helper after the earlier helper delivery could not be confirmed. Do not send or retry any email outreach. Review the current account restriction and report the next permitted recovery step only.\n\n';
